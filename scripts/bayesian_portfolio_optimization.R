@@ -31,7 +31,7 @@ COL_BAYES  <- "#2166ac"
 # 1. LOAD DATA
 ############################
 
-stocks      <- read.csv("data/stocks_2025.csv", stringsAsFactors = FALSE)
+stocks      <- read.csv("data/stocks.csv", stringsAsFactors = FALSE)
 stocks$Date <- as.Date(stocks$Date)
 stocks      <- stocks %>% arrange(Date)
 
@@ -83,6 +83,7 @@ skewness_table <- data.frame(
   Skewness  = unname(apply(R_all, 2, skewness)),
   row.names = NULL
 )
+skewness_table
 write.csv(skewness_table, "output/skewness_table.csv", row.names = FALSE)
 
 # 3.3 Shapiro-Wilk normality test
@@ -94,6 +95,7 @@ shapiro_table <- data.frame(
 )
 cat("Normal assets (Shapiro p > 0.05):",
     sum(shapiro_table$Shapiro_p_value > 0.05), "/", N_assets, "\n")
+shapiro_table
 write.csv(shapiro_table, "output/shapiro_table.csv", row.names = FALSE)
 
 # 3.4 Correlation & covariance (full sample)
@@ -182,34 +184,38 @@ bayes_weights <- function(R_window, lambda = 5,
                           kappa0    = 25,
                           nu0_extra = 20) {
   X  <- as.matrix(R_window)
-  n  <- nrow(X)
-  p  <- ncol(X)
+  n  <- nrow(X) #numero osservazioni
+  p  <- ncol(X) #numero asset
   
-  xbar     <- colMeans(X)
+  xbar     <- colMeans(X) #stime classiche media e covarianza campionaria
   S_sample <- cov(X)
   
   # ---- Prior hyperparameters ----
-  mu0 <- rep(mean(xbar), p)            # neutral view: shrink toward common mean
-  nu0 <- p + nu0_extra                 # must satisfy nu0 > p + 1
+  #mu0 <- rep(mean(xbar), p)            # neutral view: shrink toward common mean
+  mu0 <- rep(0, p) #PROVO
+  nu0 <- p + nu0_extra                 # must satisfy nu0 > p + 1, sono i gradi di libertà 
   
-  # S0: diagonal covariance target (identity structure = prior anchor)
-  # scaled to average sample variance so units are comparable
+  # S0: è la prior sulla covarianza
   prior_var <- mean(diag(S_sample))
   S0 <- prior_var * diag(p) * (nu0 - p - 1)
+  #prima di vedere i dati, assumo stessa volatiità e zero correlazioni
   
   # ---- Posterior update ----
   kappa_n <- kappa0 + n
   nu_n    <- nu0 + n
-  mu_n    <- (kappa0 * mu0 + n * xbar) / kappa_n
-  diff_mu <- matrix(xbar - mu0, ncol = 1)
+  mu_n    <- (kappa0 * mu0 + n * xbar) / kappa_n #media pesata
+  diff_mu <- matrix(xbar - mu0, ncol = 1) #calcolo la differenza tra dati e prior
   S_n     <- S0 +
     (n - 1) * S_sample +
     (kappa0 * n / kappa_n) * (diff_mu %*% t(diff_mu))
   
   # ---- Posterior predictive moments ----
+  #sto costruendo la covarianza predittiva
   scale_factor <- (kappa_n + 1) / (kappa_n * (nu_n - p - 1))
   Sigma_pred   <- scale_factor * S_n + diag(1e-6, p)
   
+  
+  # imposto l'ottimizzazione del probelma di markowitz
   Dmat <- 2 * lambda * Sigma_pred
   dvec <- mu_n
   Amat <- cbind(rep(1, p), diag(p))
@@ -220,19 +226,26 @@ bayes_weights <- function(R_window, lambda = 5,
     solve.QP(Dmat = Dmat, dvec = dvec, Amat = Amat, bvec = bvec, meq = meq),
     error = function(e) NULL
   )
+  
+  #gestione della pror e normalizzazione ( passaggi finali di controllo)
   if (is.null(sol)) return(rep(1 / p, p))
   w <- pmax(sol$solution, 0)
   w / sum(w)
 }
 
+
+#idea chiave: uso bayesian per stimare media mu_n e covarianza sigma_pred usando prior
+# e posterior e uso queste stime per risolvere markowitz e trovare i pesi ottimali
+
+
 # ------------------------------------------------------------------
 # 4.3  Performance metrics  (MONTHLY data: annualise *12 / *sqrt(12))
 # ------------------------------------------------------------------
 performance_metrics <- function(r) {
-  ann_return <- mean(r) * 12
+  ann_return <- mean(r) * 12 #annualizzo i rendimenti
   ann_vol    <- sd(r)   * sqrt(12)
   sharpe     <- ifelse(ann_vol > 0, ann_return / ann_vol, NA)
-  
+  #sharpe ratio è il rendimento per unità di rischio
   wealth      <- cumprod(1 + r)
   running_max <- cummax(wealth)
   drawdown    <- (wealth - running_max) / running_max   # <= 0
@@ -246,16 +259,29 @@ performance_metrics <- function(r) {
   )
 }
 
+
+#aggiunta ???
+#rendimenti_portfolio <- R_all %*% 
+
+#The Bayesian approach leads to more stable portfolios by shrinking both expected returns 
+#and covariance estimates. While it slightly reduces returns, it also lowers volatility, 
+#resulting in a comparable Sharpe ratio. This suggests improved robustness rather than higher performance.  
+
+
 # ------------------------------------------------------------------
 # 4.4  Turnover: average L1 weight change per rebalancing period
 # ------------------------------------------------------------------
+# turnover -> quanto spesso e quanto cambi i pesi del portafoglio nel tempo
 compute_turnover <- function(W) {
   if (nrow(W) < 2) return(NA)
   mean(rowSums(abs(diff(W))))
 }
+# W matrice dei pesi nel tempo
+# turnover alto -> cambi pesi spesso, strategia instabile e più costosa
+# turnover basso -> portafoglio stabile, meno costi
 
 ############################
-# 5. TRAINING SAMPLE WEIGHTS
+# 5. TRAINING SAMPLE WEIGHTS 
 #    Visual check on first 60-month window only
 ############################
 
@@ -279,6 +305,40 @@ barplot(w_bayes_train, main = "Bayesian Weights (Training Sample)",
         las = 2, col = COL_BAYES,
         ylim = c(0, max(w_bayes_train) * 1.3), ylab = "Weight")
 dev.off()
+dev.off()
+graphics.off()
+par(mfrow = c(1,2))
+
+barplot(w_plugin_train,
+        main = "Plug-in Weights",
+        las = 2, col = COL_PLUGIN,
+        ylim = c(0, max(c(w_plugin_train, w_bayes_train)) * 1.3))
+
+barplot(w_bayes_train,
+        main = "Bayesian Weights",
+        las = 2, col = COL_BAYES,
+        ylim = c(0, max(c(w_plugin_train, w_bayes_train)) * 1.3))
+
+par(mfrow = c(1,1))
+
+
+
+diff_w <- w_bayes_train - w_plugin_train
+
+barplot(diff_w,
+        main = "Difference (Bayesian - Plug-in)",
+        las = 2, col = "darkgray")
+abline(h = 0, lty = 2)
+
+#barra > 0: w bayes > w plug-in, il modello bayesiano aumenta il peso
+#           quell’asset viene considerato:
+#           più stabile
+#           meno sovrastimato dal plug-in
+#           più “affidabile” dopo shrinkage
+#barra < 0: il plug-in aveva dato troppo peso
+#           il Bayesiano lo riduce perché:
+#           la media campionaria era troppo ottimistica
+#           oppure la covarianza rendeva l’asset rischioso
 
 ############################
 # 6. ROLLING WINDOW BACKTEST
@@ -286,6 +346,7 @@ dev.off()
 
 # window = 60 months (5 years) — correct for monthly data
 # Note: 252 is the daily-data convention, NOT applicable here
+
 window  <- 60
 n_steps <- N_obs - window
 
@@ -334,12 +395,107 @@ m_bayes  <- performance_metrics(bayes_ret)
 results_perf <- rbind(Plugin = m_plugin, Bayesian = m_bayes)
 print(round(results_perf, 4))
 
+# Annualized_Return Annualized_Volatility Sharpe_Ratio Max_Drawdown
+# Plugin              0.1423                0.2007       0.7092      -0.2800
+# Bayesian            0.1483                0.1761       0.8418      -0.2293
+
 turnover_results <- data.frame(
   Method       = c("Plugin", "Bayesian"),
   Avg_Turnover = c(compute_turnover(plugin_W),
                    compute_turnover(bayes_W))
 )
 print(turnover_results)
+
+# Method Avg_Turnover
+# 1   Plugin    0.2892468
+# 2 Bayesian    0.2261568
+
+# Bayes "meglio" in tutto
+
+
+############################
+#prova confronto su piccole finestre
+############################
+
+regime <- case_when(
+  backtest_dates <= as.Date("2007-12-31") ~ "Expansion",
+  backtest_dates <= as.Date("2009-12-31") ~ "Global Financial Crisis",
+  backtest_dates < as.Date("2020-02-01") ~ "Low Vol / Expansion",
+  backtest_dates < as.Date("2021-12-31") ~ "COVID Crisis & Recovery",
+  backtest_dates < as.Date("2023-01-01") ~ "Inflation / Rate Shock",
+  TRUE ~ "Recent Stabilization"
+)
+
+regime_df <- data.frame(
+  Date     = backtest_dates,
+  Regime   = regime,
+  Plugin   = plugin_ret,
+  Bayesian = bayes_ret
+)
+
+
+library(dplyr)
+
+regime_perf <- regime_df %>%
+  group_by(Regime) %>%
+  summarise(
+    Plugin_Sharpe = mean(Plugin)/sd(Plugin)*sqrt(12),
+    Bayes_Sharpe  = mean(Bayesian)/sd(Bayesian)*sqrt(12),
+    Plugin_Return = mean(Plugin)*12,
+    Bayes_Return  = mean(Bayesian)*12
+  )
+
+print(regime_perf)
+
+#The results indicate that the Bayesian portfolio delivers more consistent performance 
+#across market regimes. While the plug-in approach exhibits higher sensitivity to regime-specific 
+#conditions, particularly underperforming during inflationary and transitionary environments, 
+#the Bayesian estimator provides more stable risk-adjusted returns across all regimes, reflecting 
+#its ability to mitigate estimation error and reduce overreaction to short-term fluctuations
+
+
+#Bayesian shrinkage does not necessarily maximize returns in every regime, but it improves 
+#cross-regime robustness and reduces sensitivity to market conditions.
+
+
+
+#rolling sharpe ratio
+install.packages("zoo")  # solo se serve
+library(zoo)
+rolling_sharpe <- function(r, window = 24) {
+  rollapply(r, width = window, FUN = function(x) {
+    if (sd(x) == 0) return(NA)
+    mean(x) / sd(x) * sqrt(12)
+  }, fill = NA, align = "right")
+}
+
+sharpe_plugin <- rolling_sharpe(plugin_ret, 36)
+sharpe_bayes  <- rolling_sharpe(bayes_ret, 36)
+
+roll_df <- data.frame(
+  Date = backtest_dates,
+  Plugin = sharpe_plugin,
+  Bayesian = sharpe_bayes
+)
+
+ggplot(roll_df, aes(x = Date)) +
+  geom_line(aes(y = Plugin, color = "Plug-in"), linewidth = 0.9) +
+  geom_line(aes(y = Bayesian, color = "Bayesian"), linewidth = 0.9) +
+  
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  
+  scale_color_manual(values = c("Plug-in" = COL_PLUGIN, "Bayesian" = COL_BAYES)) +
+  
+  labs(title = "Rolling Sharpe Ratio (24-month window)",
+       subtitle = "Out-of-sample performance over time",
+       y = "Sharpe Ratio",
+       x = NULL,
+       color = NULL) +
+  
+  theme_minimal()
+
+#grafico mostra che il vantaggio del modello non è costante, ma dipende dal regime di mercato
+
 
 ############################
 # 8. FIGURES
@@ -366,6 +522,7 @@ cum_df <- data.frame(
   Plugin   = cum_plugin,
   Bayesian = cum_bayes
 )
+cum_df
 write.csv(cum_df, "output/cumulative_wealth.csv", row.names = FALSE)
 
 p_wealth <- cum_df %>%
@@ -460,6 +617,80 @@ p_perf <- data.frame(
 
 ggsave("figures/performance_summary.png", p_perf, width = 7, height = 5, dpi = 150)
 
+
+############################
+#provo grafico confronto: distribution of portfolio returns
+############################
+
+# ---- 8.6 Distribution of Portfolio Returns ----
+
+dist_df <- data.frame(
+  Return = c(plugin_ret, bayes_ret),
+  Strategy = rep(c("Plugin", "Bayesian"),
+                 each = length(plugin_ret))
+)
+
+p_dist <- ggplot(dist_df, aes(x = Return, fill = Strategy)) +
+  geom_density(alpha = 0.4) +
+  geom_vline(xintercept = mean(plugin_ret), 
+             color = COL_PLUGIN, linetype = "dashed") +
+  geom_vline(xintercept = mean(bayes_ret), 
+             color = COL_BAYES, linetype = "dashed") +
+  scale_fill_manual(values = c("Plugin" = COL_PLUGIN,
+                               "Bayesian" = COL_BAYES)) +
+  labs(title = "Distribution of Portfolio Returns",
+       subtitle = "Plug-in vs Bayesian",
+       x = "Monthly Return",
+       y = "Density",
+       fill = NULL) +
+  theme_portfolio
+
+ggsave("figures/return_distribution.png", p_dist,
+       width = 8, height = 5, dpi = 150)
+
+
+
+
+#altro
+# ---- 8.7 Left tail comparison (extreme losses) ----
+
+tail_df <- dist_df %>%
+  filter(Return < quantile(Return, 0.1))  # peggior 10%
+
+p_tail <- ggplot(tail_df, aes(x = Return, fill = Strategy)) +
+  geom_density(alpha = 0.5) +
+  scale_fill_manual(values = c("Plugin" = COL_PLUGIN,
+                               "Bayesian" = COL_BAYES)) +
+  labs(title = "Left Tail of Returns (Worst 10%)",
+       subtitle = "Extreme downside risk comparison",
+       x = "Monthly Return",
+       y = "Density",
+       fill = NULL) +
+  theme_portfolio
+
+ggsave("figures/left_tail.png", p_tail,
+       width = 8, height = 5, dpi = 150)
+
+
+
+
+# ---- downside risk metrics ----
+
+prob_loss_plugin <- mean(plugin_ret < 0)
+prob_loss_bayes  <- mean(bayes_ret  < 0)
+
+extreme_loss_plugin <- mean(plugin_ret < -0.05)
+extreme_loss_bayes  <- mean(bayes_ret  < -0.05)
+
+cat("Probabilità perdita:\n")
+cat("Plugin:", prob_loss_plugin, "\n")
+cat("Bayes :", prob_loss_bayes, "\n\n")
+
+cat("Probabilità perdita estrema (< -5%):\n")
+cat("Plugin:", extreme_loss_plugin, "\n")
+cat("Bayes :", extreme_loss_bayes, "\n")
+
+
 ############################
 # 9. SAVE OUTPUTS
 ############################
@@ -502,3 +733,25 @@ cat(sprintf("%-25s %10.4f %10.4f\n",   "Avg Turnover",
             turnover_results$Avg_Turnover[2]))
 cat("====================================================\n")
 cat("\nOutputs -> output/\nFigures  -> figures/\nDone.\n")
+
+
+
+
+#check
+weight_instability <- function(W) {
+  mean(apply(W, 1, function(w) sum((w - mean(w))^2)))
+}
+
+turnover_ts <- function(W) {
+  rowSums(abs(diff(W)))
+}
+
+inst_plugin <- weight_instability(plugin_W)
+inst_bayes  <- weight_instability(bayes_W)
+
+cat("\n=== STABILITY METRICS ===\n")
+cat("Weight Instability (Plugin):  ", inst_plugin, "\n")
+cat("Weight Instability (Bayes):   ", inst_bayes, "\n")
+cat("Avg Turnover (Plugin):        ", mean(turnover_ts(plugin_W)), "\n")
+cat("Avg Turnover (Bayes):         ", mean(turnover_ts(bayes_W)), "\n")
+
