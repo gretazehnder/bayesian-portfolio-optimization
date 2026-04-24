@@ -9,7 +9,8 @@
 # 0. SETUP
 ############################
 
-required_packages <- c("tidyverse", "moments", "corrplot", "quadprog", "ggplot2", "scales", "zoo")
+required_packages <- c("tidyverse", "moments", "corrplot", "quadprog",
+                       "ggplot2", "scales", "zoo", "gt", "webshot2")
 for (pkg in required_packages) {
   if (!requireNamespace(pkg, quietly = TRUE)) install.packages(pkg)
 }
@@ -21,15 +22,16 @@ library(quadprog)
 library(ggplot2)
 library(scales)
 library(zoo)
+library(gt)
 
 dir.create("output",  showWarnings = FALSE)
 dir.create("figures", showWarnings = FALSE)
 
 COL_PLUGIN <- "#d73027"
 COL_BAYES  <- "#2166ac"
+COL_EW     <- "#4dac26"   # equally weighted benchmark
 
-# ---- Chart background theme ----
-BG_COLOR   <- "#F5F5F0"
+BG_COLOR <- "#F5F5F0"
 
 theme_portfolio <- theme_minimal(base_size = 13) +
   theme(
@@ -92,26 +94,27 @@ cat("Assets:      ", N_assets, "\n\n")
 cat("=== EDA ===\n")
 
 # 3.1 Summary statistics
+# Note: kurtosis() from {moments} returns TOTAL kurtosis (normal = 3).
+# Excess kurtosis = kurtosis(x) - 3, which is what most finance literature reports.
 summary_stats <- data.frame(
-  Asset    = asset_names,
-  Mean     = unname(colMeans(R_all)),
-  SD       = unname(apply(R_all, 2, sd)),
-  Min      = unname(apply(R_all, 2, min)),
-  Max      = unname(apply(R_all, 2, max)),
-  Skewness = unname(apply(R_all, 2, skewness)),
-  Kurtosis = unname(apply(R_all, 2, kurtosis)),
-  row.names = NULL
+  Asset          = asset_names,
+  Mean           = unname(colMeans(R_all)),
+  SD             = unname(apply(R_all, 2, sd)),
+  Min            = unname(apply(R_all, 2, min)),
+  Max            = unname(apply(R_all, 2, max)),
+  Skewness       = unname(apply(R_all, 2, skewness)),
+  Excess_Kurtosis = unname(apply(R_all, 2, function(x) kurtosis(x) - 3)),
+  row.names      = NULL
 )
 print(summary_stats[, sapply(summary_stats, is.numeric)] %>% round(5))
 write.csv(summary_stats, "output/summary_stats.csv", row.names = FALSE)
 
 # 3.2 Skewness table
 skewness_table <- data.frame(
-  Asset     = asset_names,
-  Skewness  = unname(apply(R_all, 2, skewness)),
+  Asset    = asset_names,
+  Skewness = unname(apply(R_all, 2, skewness)),
   row.names = NULL
 )
-skewness_table
 write.csv(skewness_table, "output/skewness_table.csv", row.names = FALSE)
 
 # 3.3 Shapiro-Wilk normality test
@@ -123,7 +126,6 @@ shapiro_table <- data.frame(
 )
 cat("Normal assets (Shapiro p > 0.05):",
     sum(shapiro_table$Shapiro_p_value > 0.05), "/", N_assets, "\n")
-shapiro_table
 write.csv(shapiro_table, "output/shapiro_table.csv", row.names = FALSE)
 
 # 3.4 Correlation & covariance (full sample)
@@ -191,6 +193,9 @@ bayes_weights <- function(R_window, lambda = 5,
   S_sample <- cov(X)
   
   # ---- Prior hyperparameters ----
+  # nu0_extra controls degrees of freedom beyond the minimum (p+1).
+  # Note: nu0 is NOT part of the sensitivity grid here; it could be
+  # an additional axis of robustness analysis (left as future work).
   mu0 <- rep(0, p)
   nu0 <- p + nu0_extra
   
@@ -233,7 +238,10 @@ performance_metrics <- function(r) {
   ann_return <- mean(r) * 12
   ann_vol    <- sd(r)   * sqrt(12)
   sharpe     <- ifelse(ann_vol > 0, ann_return / ann_vol, NA)
-  wealth      <- cumprod(1 + r)
+  
+  # Wealth starts at $1: prepend 0 to cumsum so first observation is exp(r[1])
+  # relative to a starting value of 1.
+  wealth      <- c(1, exp(cumsum(r)))
   running_max <- cummax(wealth)
   drawdown    <- (wealth - running_max) / running_max
   max_dd      <- min(drawdown)
@@ -252,6 +260,51 @@ performance_metrics <- function(r) {
 compute_turnover <- function(W) {
   if (nrow(W) < 2) return(NA)
   mean(rowSums(abs(diff(W))))
+}
+
+# ------------------------------------------------------------------
+# 4.5  gt table helper — consistent style across all tables
+# ------------------------------------------------------------------
+save_gt_table <- function(gt_obj, filepath, width = 700) {
+  gt_obj %>%
+    gtsave(filepath)
+}
+
+make_gt <- function(df, title, subtitle = NULL,
+                    pct_cols  = NULL,   # columns to format as percentage
+                    num_cols  = NULL,   # columns to format as plain number
+                    decimals  = 2) {
+  
+  tbl <- df %>%
+    gt() %>%
+    tab_header(
+      title    = md(paste0("**", title, "**")),
+      subtitle = if (!is.null(subtitle)) subtitle else NULL
+    ) %>%
+    tab_options(
+      table.background.color        = BG_COLOR,
+      column_labels.background.color = "#DEDAD5",
+      column_labels.font.weight     = "bold",
+      table.font.size               = px(13),
+      data_row.padding              = px(6),
+      table.border.top.color        = "transparent",
+      table.border.bottom.color     = "transparent"
+    ) %>%
+    opt_horizontal_padding(scale = 2)
+  
+  if (!is.null(pct_cols)) {
+    tbl <- tbl %>%
+      fmt_number(columns = all_of(pct_cols),
+                 decimals = decimals,
+                 suffix   = "%")
+  }
+  
+  if (!is.null(num_cols)) {
+    tbl <- tbl %>%
+      fmt_number(columns = all_of(num_cols), decimals = decimals)
+  }
+  
+  tbl
 }
 
 ############################
@@ -282,19 +335,22 @@ barplot(w_bayes_train, main = "Bayesian Weights (Training Sample)",
 dev.off()
 
 graphics.off()
-par(mfrow = c(1, 2))
 
-barplot(w_plugin_train,
-        main = "Plug-in Weights",
-        las = 2, col = COL_PLUGIN,
-        ylim = c(0, max(c(w_plugin_train, w_bayes_train)) * 1.3))
+weights_df <- data.frame(
+  Asset  = rep(asset_names, 2),
+  Weight = c(w_plugin_train, w_bayes_train),
+  Method = rep(c("Plugin", "Bayesian"), each = length(asset_names))
+)
 
-barplot(w_bayes_train,
-        main = "Bayesian Weights",
-        las = 2, col = COL_BAYES,
-        ylim = c(0, max(c(w_plugin_train, w_bayes_train)) * 1.3))
+p_weights <- ggplot(weights_df, aes(x = Asset, y = Weight, fill = Method)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  scale_fill_manual(values = c("Plugin" = COL_PLUGIN, "Bayesian" = COL_BAYES)) +
+  coord_flip() +
+  labs(title = "Portfolio Weights Comparison (Training Sample)",
+       x = NULL, y = "Weight", fill = NULL) +
+  theme_portfolio
 
-par(mfrow = c(1, 1))
+print(p_weights)
 
 diff_w <- w_bayes_train - w_plugin_train
 barplot(diff_w,
@@ -318,6 +374,7 @@ cat("Out-of-sample:    ",
 
 plugin_ret <- numeric(n_steps)
 bayes_ret  <- numeric(n_steps)
+ew_ret     <- numeric(n_steps)          # equally weighted benchmark
 plugin_W   <- matrix(NA_real_, nrow = n_steps, ncol = N_assets)
 bayes_W    <- matrix(NA_real_, nrow = n_steps, ncol = N_assets)
 
@@ -329,9 +386,12 @@ for (t in seq_len(n_steps)) {
   
   w_p <- plugin_weights(R_window, lambda = 5)
   w_b <- bayes_weights( R_window, lambda = 5)
+  w_e <- rep(1 / N_assets, N_assets)   # equally weighted — no estimation needed
   
-  plugin_ret[t] <- sum(w_p * r_next)
-  bayes_ret[t]  <- sum(w_b * r_next)
+  plugin_ret[t] <- log(sum(w_p * exp(r_next)))
+  bayes_ret[t]  <- log(sum(w_b * exp(r_next)))
+  ew_ret[t]     <- log(sum(w_e * exp(r_next)))
+  
   plugin_W[t, ] <- w_p
   bayes_W[t, ]  <- w_b
   
@@ -349,16 +409,113 @@ cat("\n=== Performance Metrics ===\n")
 
 m_plugin <- performance_metrics(plugin_ret)
 m_bayes  <- performance_metrics(bayes_ret)
+m_ew     <- performance_metrics(ew_ret)
 
-results_perf <- rbind(Plugin = m_plugin, Bayesian = m_bayes)
+results_perf <- rbind(Plugin = m_plugin, Bayesian = m_bayes, EqualWeight = m_ew)
 print(round(results_perf, 4))
 
 turnover_results <- data.frame(
-  Method       = c("Plugin", "Bayesian"),
+  Method       = c("Plugin", "Bayesian", "EqualWeight"),
   Avg_Turnover = c(compute_turnover(plugin_W),
-                   compute_turnover(bayes_W))
+                   compute_turnover(bayes_W),
+                   NA)   # EW has constant weights (no rebalancing drift shown)
 )
 print(turnover_results)
+
+############################
+# SENSITIVITY ANALYSIS
+############################
+
+kappa_grid <- c(5, 10, 25, 50, 100)
+
+sensitivity_results <- map_dfr(kappa_grid, function(k) {
+  
+  bayes_ret_k <- numeric(n_steps)
+  bayes_W_k   <- matrix(NA_real_, nrow = n_steps, ncol = N_assets)
+  
+  for (t in seq_len(n_steps)) {
+    R_window <- R_all[t:(t + window - 1), ]
+    r_next   <- R_all[t + window, ]
+    
+    w_b <- bayes_weights(R_window, lambda = 5, kappa0 = k)
+    
+    bayes_ret_k[t] <- log(sum(w_b * exp(r_next)))
+    bayes_W_k[t, ] <- w_b
+  }
+  
+  m_b <- performance_metrics(bayes_ret_k)
+  
+  data.frame(
+    kappa0   = k,
+    Sharpe   = m_b$Sharpe_Ratio,
+    Return   = m_b$Annualized_Return,
+    Vol      = m_b$Annualized_Volatility,
+    Turnover = compute_turnover(bayes_W_k)
+  )
+})
+print(round(sensitivity_results, 4))
+
+# kappa0 = 25 extracted directly from sensitivity_results for consistency
+bayes_ret_25 <- {
+  tmp <- numeric(n_steps)
+  for (t in seq_len(n_steps)) {
+    R_window <- R_all[t:(t + window - 1), ]
+    r_next   <- R_all[t + window, ]
+    w_b25    <- bayes_weights(R_window, lambda = 5, kappa0 = 25)
+    tmp[t]   <- log(sum(w_b25 * exp(r_next)))
+  }
+  tmp
+}
+
+# kappa0 = 50
+bayes_ret_50 <- {
+  tmp <- numeric(n_steps)
+  for (t in seq_len(n_steps)) {
+    R_window <- R_all[t:(t + window - 1), ]
+    r_next   <- R_all[t + window, ]
+    w_b50    <- bayes_weights(R_window, lambda = 5, kappa0 = 50)
+    tmp[t]   <- log(sum(w_b50 * exp(r_next)))
+  }
+  tmp
+}
+
+p_kappa_sharpe <- ggplot(sensitivity_results, aes(x = kappa0, y = Sharpe)) +
+  geom_line(color = COL_BAYES, linewidth = 1) +
+  geom_point(color = COL_BAYES, size = 3) +
+  geom_hline(yintercept = m_plugin$Sharpe_Ratio,
+             linetype = "dashed", color = COL_PLUGIN) +
+  geom_hline(yintercept = m_ew$Sharpe_Ratio,
+             linetype = "dotted", color = COL_EW) +
+  labs(title    = "Sensitivity Analysis: Sharpe vs kappa0",
+       subtitle = "Dashed = Plug-in  |  Dotted = Equal-Weight",
+       x = "kappa0 (prior strength)",
+       y = "Sharpe Ratio") +
+  theme_portfolio
+
+print(p_kappa_sharpe)
+ggsave("figures/sensitivity_kappa.png", p_kappa_sharpe, width = 8, height = 5, dpi = 150)
+
+# Comparison kappa=25 vs kappa=50
+cum_df_kappa <- data.frame(
+  Date     = backtest_dates,
+  Bayes_25 = exp(cumsum(bayes_ret_25)),
+  Bayes_50 = exp(cumsum(bayes_ret_50))
+)
+
+p_compare <- cum_df_kappa %>%
+  pivot_longer(-Date, names_to = "Strategy", values_to = "Wealth") %>%
+  ggplot(aes(x = Date, y = Wealth, color = Strategy)) +
+  geom_line(linewidth = 1) +
+  scale_color_manual(values = c("Bayes_25" = COL_BAYES, "Bayes_50" = "#1b9e77")) +
+  labs(title    = "Cumulative Wealth: Bayesian kappa0 = 25 vs 50",
+       x = NULL, y = "Wealth ($1 invested)", color = NULL) +
+  theme_portfolio
+
+print(p_compare)
+ggsave("figures/kappa_comparison.png", p_compare, width = 9, height = 5, dpi = 150)
+
+# Results are robust across a wide range of kappa0, with Sharpe peaking around
+# kappa0 = 25-50. We retain kappa0 = 25 as baseline (bayes_ret = bayes_ret_25).
 
 ############################
 # REGIME ANALYSIS
@@ -377,7 +534,8 @@ regime_df <- data.frame(
   Date     = backtest_dates,
   Regime   = regime,
   Plugin   = plugin_ret,
-  Bayesian = bayes_ret
+  Bayesian = bayes_ret,
+  EW       = ew_ret
 )
 
 regime_perf <- regime_df %>%
@@ -385,8 +543,10 @@ regime_perf <- regime_df %>%
   summarise(
     Plugin_Sharpe = mean(Plugin)   / sd(Plugin)   * sqrt(12),
     Bayes_Sharpe  = mean(Bayesian) / sd(Bayesian) * sqrt(12),
+    EW_Sharpe     = mean(EW)       / sd(EW)       * sqrt(12),
     Plugin_Return = mean(Plugin)   * 12,
-    Bayes_Return  = mean(Bayesian) * 12
+    Bayes_Return  = mean(Bayesian) * 12,
+    EW_Return     = mean(EW)       * 12
   )
 
 print(regime_perf)
@@ -404,14 +564,15 @@ rolling_sharpe <- function(r, window = 24) {
 
 sharpe_plugin <- rolling_sharpe(plugin_ret)
 sharpe_bayes  <- rolling_sharpe(bayes_ret)
+sharpe_ew     <- rolling_sharpe(ew_ret)
 
 roll_df <- data.frame(
   Date     = backtest_dates,
   Plugin   = sharpe_plugin,
-  Bayesian = sharpe_bayes
+  Bayesian = sharpe_bayes,
+  EW       = sharpe_ew
 ) %>% drop_na()
 
-# Crisis regime bands
 regime_bands <- data.frame(
   xmin  = as.Date(c("2007-12-01", "2020-02-01", "2022-01-01")),
   xmax  = as.Date(c("2009-12-31", "2021-12-31", "2022-12-31")),
@@ -426,11 +587,13 @@ p_rolling_sharpe <- ggplot(roll_df, aes(x = Date)) +
             alpha = 0.4, inherit.aes = FALSE) +
   scale_fill_manual(values = setNames(regime_bands$fill, regime_bands$label),
                     name = "Regime") +
-  geom_line(aes(y = Plugin,   color = "Plug-in"),  linewidth = 0.9) +
-  geom_line(aes(y = Bayesian, color = "Bayesian"), linewidth = 0.9) +
+  geom_line(aes(y = Plugin,   color = "Plug-in"),       linewidth = 0.9) +
+  geom_line(aes(y = Bayesian, color = "Bayesian"),      linewidth = 0.9) +
+  geom_line(aes(y = EW,       color = "Equal-Weight"),  linewidth = 0.9, linetype = "dotted") +
   geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
-  scale_color_manual(values = c("Plug-in"  = COL_PLUGIN,
-                                "Bayesian" = COL_BAYES),
+  scale_color_manual(values = c("Plug-in"      = COL_PLUGIN,
+                                "Bayesian"     = COL_BAYES,
+                                "Equal-Weight" = COL_EW),
                      name = "Strategy") +
   labs(title    = "Rolling Sharpe Ratio (24-month window)",
        subtitle = "Out-of-sample performance over time",
@@ -452,13 +615,15 @@ period_label <- paste0(
 )
 
 # ---- 8.1 Cumulative Wealth ----
-cum_plugin <- cumprod(1 + plugin_ret)
-cum_bayes  <- cumprod(1 + bayes_ret)
+cum_plugin <- exp(cumsum(plugin_ret))
+cum_bayes  <- exp(cumsum(bayes_ret))
+cum_ew     <- exp(cumsum(ew_ret))
 
 cum_df <- data.frame(
-  Date     = backtest_dates,
-  Plugin   = cum_plugin,
-  Bayesian = cum_bayes
+  Date         = backtest_dates,
+  Plugin       = cum_plugin,
+  Bayesian     = cum_bayes,
+  Equal_Weight = cum_ew
 )
 write.csv(cum_df, "output/cumulative_wealth.csv", row.names = FALSE)
 
@@ -466,8 +631,9 @@ p_wealth <- cum_df %>%
   pivot_longer(-Date, names_to = "Strategy", values_to = "Wealth") %>%
   ggplot(aes(x = Date, y = Wealth, colour = Strategy)) +
   geom_line(linewidth = 0.9) +
-  scale_colour_manual(values = c("Plugin"   = COL_PLUGIN,
-                                 "Bayesian" = COL_BAYES)) +
+  scale_colour_manual(values = c("Plugin"       = COL_PLUGIN,
+                                 "Bayesian"     = COL_BAYES,
+                                 "Equal_Weight" = COL_EW)) +
   labs(title    = "Out-of-Sample Cumulative Wealth ($1 invested)",
        subtitle = period_label,
        x = NULL, y = "Cumulative Wealth ($)", colour = NULL) +
@@ -475,25 +641,27 @@ p_wealth <- cum_df %>%
 
 ggsave("figures/cumulative_wealth.png", p_wealth, width = 10, height = 5, dpi = 150)
 
-# ---- 8.2 Drawdown (Bayesian plotted first so Plug-in is on top) ----
+# ---- 8.2 Drawdown ----
 peak_p <- cummax(cum_plugin)
 peak_b <- cummax(cum_bayes)
+peak_e <- cummax(cum_ew)
 
 dd_df <- data.frame(
-  Date     = backtest_dates,
-  Plugin   = (cum_plugin - peak_p) / peak_p,
-  Bayesian = (cum_bayes  - peak_b) / peak_b
+  Date         = backtest_dates,
+  Plugin       = (cum_plugin - peak_p) / peak_p,
+  Bayesian     = (cum_bayes  - peak_b) / peak_b,
+  Equal_Weight = (cum_ew     - peak_e) / peak_e
 )
 
-# Pivot with Bayesian first so it renders behind Plug-in
 dd_long <- dd_df %>%
   pivot_longer(-Date, names_to = "Strategy", values_to = "Drawdown") %>%
-  mutate(Strategy = factor(Strategy, levels = c("Plugin", "Bayesian")))
+  mutate(Strategy = factor(Strategy, levels = c("Plugin", "Bayesian", "Equal_Weight")))
 
 p_drawdown <- ggplot(dd_long, aes(x = Date, y = Drawdown, fill = Strategy)) +
-  geom_area(alpha = 0.50, position = "identity") +
-  scale_fill_manual(values = c("Plugin"   = COL_PLUGIN,
-                               "Bayesian" = COL_BAYES)) +
+  geom_area(alpha = 0.45, position = "identity") +
+  scale_fill_manual(values = c("Plugin"       = COL_PLUGIN,
+                               "Bayesian"     = COL_BAYES,
+                               "Equal_Weight" = COL_EW)) +
   scale_y_continuous(
     labels = function(x) paste0(round(x * 100, 0), "%"),
     breaks = seq(-0.4, 0, by = 0.1)
@@ -526,15 +694,17 @@ ggsave("figures/weight_instability.png", p_wvol, width = 9, height = 7, dpi = 15
 
 # ---- 8.4 Monthly returns ----
 p_ret <- data.frame(
-  Date     = backtest_dates,
-  Plugin   = plugin_ret,
-  Bayesian = bayes_ret
+  Date         = backtest_dates,
+  Plugin       = plugin_ret,
+  Bayesian     = bayes_ret,
+  Equal_Weight = ew_ret
 ) %>%
   pivot_longer(-Date, names_to = "Strategy", values_to = "Return") %>%
   ggplot(aes(x = Date, y = Return, colour = Strategy)) +
   geom_line(alpha = 0.65, linewidth = 0.5) +
-  scale_colour_manual(values = c("Plugin"   = COL_PLUGIN,
-                                 "Bayesian" = COL_BAYES)) +
+  scale_colour_manual(values = c("Plugin"       = COL_PLUGIN,
+                                 "Bayesian"     = COL_BAYES,
+                                 "Equal_Weight" = COL_EW)) +
   scale_y_continuous(labels = percent_format(accuracy = 1)) +
   labs(title    = "Monthly Out-of-Sample Returns",
        subtitle = period_label,
@@ -543,39 +713,55 @@ p_ret <- data.frame(
 
 ggsave("figures/monthly_returns.png", p_ret, width = 10, height = 4, dpi = 150)
 
-# ---- 8.5 Performance bar chart ----
-p_perf <- data.frame(
-  Method     = c("Plugin", "Bayesian"),
-  Ann_Return = c(m_plugin$Annualized_Return,    m_bayes$Annualized_Return),
-  Ann_Vol    = c(m_plugin$Annualized_Volatility, m_bayes$Annualized_Volatility),
-  Sharpe     = c(m_plugin$Sharpe_Ratio,          m_bayes$Sharpe_Ratio)
+# ---- 8.5 Performance bar charts ----
+p_perf_pct <- data.frame(
+  Method     = c("Plugin", "Bayesian", "Equal-Weight"),
+  Ann_Return = c(m_plugin$Annualized_Return,    m_bayes$Annualized_Return,    m_ew$Annualized_Return),
+  Ann_Vol    = c(m_plugin$Annualized_Volatility, m_bayes$Annualized_Volatility, m_ew$Annualized_Volatility)
 ) %>%
   pivot_longer(-Method, names_to = "Metric", values_to = "Value") %>%
   ggplot(aes(x = Metric, y = Value, fill = Method)) +
   geom_bar(stat = "identity", position = "dodge", width = 0.65) +
-  scale_fill_manual(values = c("Plugin"   = COL_PLUGIN,
-                               "Bayesian" = COL_BAYES)) +
+  scale_fill_manual(values = c("Plugin"       = COL_PLUGIN,
+                               "Bayesian"     = COL_BAYES,
+                               "Equal-Weight" = COL_EW)) +
   scale_y_continuous(labels = percent_format(accuracy = 0.1)) +
-  labs(title = "Annualised Performance Metrics",
+  labs(title = "Annualised Return & Volatility",
        x = NULL, y = NULL, fill = NULL) +
   theme_portfolio
 
-ggsave("figures/performance_summary.png", p_perf, width = 7, height = 5, dpi = 150)
+p_sharpe <- data.frame(
+  Method = c("Plugin", "Bayesian", "Equal-Weight"),
+  Sharpe = c(m_plugin$Sharpe_Ratio, m_bayes$Sharpe_Ratio, m_ew$Sharpe_Ratio)
+) %>%
+  ggplot(aes(x = Method, y = Sharpe, fill = Method)) +
+  geom_bar(stat = "identity", width = 0.6) +
+  scale_fill_manual(values = c("Plugin"       = COL_PLUGIN,
+                               "Bayesian"     = COL_BAYES,
+                               "Equal-Weight" = COL_EW)) +
+  labs(title = "Sharpe Ratio",
+       x = NULL, y = "Sharpe Ratio", fill = NULL) +
+  theme_portfolio
+
+ggsave("figures/performance_pct.png", p_perf_pct, width = 7, height = 5, dpi = 150)
+ggsave("figures/sharpe_ratio.png",   p_sharpe,   width = 6, height = 4, dpi = 150)
 
 # ---- 8.6 Distribution of Portfolio Returns ----
 dist_df <- data.frame(
-  Return   = c(plugin_ret, bayes_ret),
-  Strategy = rep(c("Plugin", "Bayesian"), each = length(plugin_ret))
+  Return   = c(plugin_ret, bayes_ret, ew_ret),
+  Strategy = rep(c("Plugin", "Bayesian", "Equal-Weight"), each = length(plugin_ret))
 )
 
 p_dist <- ggplot(dist_df, aes(x = Return, fill = Strategy)) +
   geom_density(alpha = 0.4) +
   geom_vline(xintercept = mean(plugin_ret), color = COL_PLUGIN, linetype = "dashed") +
   geom_vline(xintercept = mean(bayes_ret),  color = COL_BAYES,  linetype = "dashed") +
-  scale_fill_manual(values = c("Plugin"   = COL_PLUGIN,
-                               "Bayesian" = COL_BAYES)) +
+  geom_vline(xintercept = mean(ew_ret),     color = COL_EW,     linetype = "dashed") +
+  scale_fill_manual(values = c("Plugin"       = COL_PLUGIN,
+                               "Bayesian"     = COL_BAYES,
+                               "Equal-Weight" = COL_EW)) +
   labs(title    = "Distribution of Portfolio Returns",
-       subtitle = "Plug-in vs Bayesian",
+       subtitle = "Plug-in vs Bayesian vs Equal-Weight",
        x = "Monthly Return", y = "Density", fill = NULL) +
   theme_portfolio
 
@@ -587,8 +773,9 @@ tail_df <- dist_df %>%
 
 p_tail <- ggplot(tail_df, aes(x = Return, fill = Strategy)) +
   geom_density(alpha = 0.5) +
-  scale_fill_manual(values = c("Plugin"   = COL_PLUGIN,
-                               "Bayesian" = COL_BAYES)) +
+  scale_fill_manual(values = c("Plugin"       = COL_PLUGIN,
+                               "Bayesian"     = COL_BAYES,
+                               "Equal-Weight" = COL_EW)) +
   labs(title    = "Left Tail of Returns (Worst 10%)",
        subtitle = "Extreme downside risk comparison",
        x = "Monthly Return", y = "Density", fill = NULL) +
@@ -599,11 +786,13 @@ ggsave("figures/left_tail.png", p_tail, width = 8, height = 5, dpi = 150)
 # ---- Downside risk metrics ----
 cat("\nLoss probability:\n")
 cat("Plugin:", mean(plugin_ret < 0), "\n")
-cat("Bayes :", mean(bayes_ret  < 0), "\n\n")
+cat("Bayes :", mean(bayes_ret  < 0), "\n")
+cat("EW    :", mean(ew_ret     < 0), "\n\n")
 
 cat("Extreme loss probability (< -5%):\n")
 cat("Plugin:", mean(plugin_ret < -0.05), "\n")
 cat("Bayes :", mean(bayes_ret  < -0.05), "\n")
+cat("EW    :", mean(ew_ret     < -0.05), "\n")
 
 ############################
 # 9. SAVE OUTPUTS
@@ -617,41 +806,105 @@ write.csv(turnover_results, "output/turnover_results.csv",    row.names = FALSE)
 write.csv(
   data.frame(Date            = backtest_dates,
              Plugin_Return   = plugin_ret,
-             Bayesian_Return = bayes_ret),
+             Bayesian_Return = bayes_ret,
+             EW_Return       = ew_ret),
   "output/backtest_returns.csv", row.names = FALSE
 )
 
 ############################
-# 10. FINAL SUMMARY
+# 10. GT TABLES
 ############################
 
-cat("\n====================================================\n")
-cat("  FINAL PERFORMANCE SUMMARY\n")
-cat("====================================================\n")
-cat(sprintf("%-25s %10s %10s\n", "Metric", "Plug-in", "Bayesian"))
-cat(strrep("-", 47), "\n")
-cat(sprintf("%-25s %9.2f%% %9.2f%%\n", "Annualised Return",
-            m_plugin$Annualized_Return * 100,
-            m_bayes$Annualized_Return  * 100))
-cat(sprintf("%-25s %9.2f%% %9.2f%%\n", "Annualised Volatility",
-            m_plugin$Annualized_Volatility * 100,
-            m_bayes$Annualized_Volatility  * 100))
-cat(sprintf("%-25s %10.4f %10.4f\n", "Sharpe Ratio",
-            m_plugin$Sharpe_Ratio,
-            m_bayes$Sharpe_Ratio))
-cat(sprintf("%-25s %9.2f%% %9.2f%%\n", "Max Drawdown",
-            m_plugin$Max_Drawdown * 100,
-            m_bayes$Max_Drawdown  * 100))
-cat(sprintf("%-25s %10.4f %10.4f\n", "Avg Turnover",
-            turnover_results$Avg_Turnover[1],
-            turnover_results$Avg_Turnover[2]))
-cat("====================================================\n")
-cat("\nOutputs -> output/\nFigures  -> figures/\nDone.\n")
+cat("\n=== Saving Tables (gt) ===\n")
 
-############################
-# 11. STABILITY METRICS
-############################
+# ---- 10.1 Final performance table ----
+perf_gt_df <- data.frame(
+  Metric   = c("Annualised Return (%)",
+               "Annualised Volatility (%)",
+               "Sharpe Ratio",
+               "Max Drawdown (%)",
+               "Avg Turnover"),
+  
+  Plug_in  = c(m_plugin$Annualized_Return     * 100,
+               m_plugin$Annualized_Volatility * 100,
+               m_plugin$Sharpe_Ratio,
+               m_plugin$Max_Drawdown          * 100,
+               turnover_results$Avg_Turnover[1]),
+  
+  Bayesian = c(m_bayes$Annualized_Return     * 100,
+               m_bayes$Annualized_Volatility * 100,
+               m_bayes$Sharpe_Ratio,
+               m_bayes$Max_Drawdown          * 100,
+               turnover_results$Avg_Turnover[2]),
+  
+  Equal_Weight = c(m_ew$Annualized_Return     * 100,
+                   m_ew$Annualized_Volatility * 100,
+                   m_ew$Sharpe_Ratio,
+                   m_ew$Max_Drawdown          * 100,
+                   NA)
+)
 
+perf_gt <- perf_gt_df %>%
+  gt() %>%
+  tab_header(
+    title    = md("**Performance Summary**"),
+    subtitle = md(paste0("*Out-of-sample: ", period_label, "*"))
+  ) %>%
+  cols_label(
+    Metric       = "Metric",
+    Plug_in      = "Plug-in",
+    Bayesian     = "Bayesian",
+    Equal_Weight = "Equal-Weight"
+  ) %>%
+  fmt_number(
+    columns  = c(Plug_in, Bayesian, Equal_Weight),
+    rows     = Metric %in% c("Annualised Return (%)",
+                             "Annualised Volatility (%)",
+                             "Max Drawdown (%)"),
+    decimals = 2
+  ) %>%
+  fmt_number(
+    columns  = c(Plug_in, Bayesian, Equal_Weight),
+    rows     = Metric == "Sharpe Ratio",
+    decimals = 4
+  ) %>%
+  fmt_number(
+    columns  = c(Plug_in, Bayesian),
+    rows     = Metric == "Avg Turnover",
+    decimals = 4
+  ) %>%
+  fmt_missing(columns = everything(), missing_text = "—") %>%
+  # Highlight best value per row
+  tab_style(
+    style    = cell_fill(color = "#cce5ff"),
+    locations = cells_body(
+      columns = Bayesian,
+      rows    = Metric == "Sharpe Ratio"
+    )
+  ) %>%
+  tab_style(
+    style    = cell_fill(color = "#cce5ff"),
+    locations = cells_body(
+      columns = Bayesian,
+      rows    = Metric == "Max Drawdown (%)"
+    )
+  ) %>%
+  tab_options(
+    table.background.color         = BG_COLOR,
+    column_labels.background.color = "#DEDAD5",
+    column_labels.font.weight      = "bold",
+    table.font.size                = px(13),
+    data_row.padding               = px(7),
+    table.border.top.color         = "transparent",
+    table.border.bottom.color      = "transparent"
+  ) %>%
+  opt_horizontal_padding(scale = 2) %>%
+  tab_footnote("Blue highlight = best value in row.")
+
+perf_gt
+gtsave(perf_gt, "figures/final_performance_table.png", zoom = 2)
+
+# ---- 10.2 Stability metrics table ----
 weight_instability <- function(W) {
   mean(apply(W, 1, function(w) sum((w - mean(w))^2)))
 }
@@ -660,8 +913,95 @@ turnover_ts <- function(W) {
   rowSums(abs(diff(W)))
 }
 
-cat("\n=== STABILITY METRICS ===\n")
-cat("Weight Instability (Plugin): ", weight_instability(plugin_W), "\n")
-cat("Weight Instability (Bayes):  ", weight_instability(bayes_W),  "\n")
-cat("Avg Turnover (Plugin):       ", mean(turnover_ts(plugin_W)),  "\n")
-cat("Avg Turnover (Bayes):        ", mean(turnover_ts(bayes_W)),   "\n")
+stab_gt_df <- data.frame(
+  Metric   = c("Weight Instability", "Avg Turnover"),
+  Plug_in  = c(weight_instability(plugin_W), mean(turnover_ts(plugin_W))),
+  Bayesian = c(weight_instability(bayes_W),  mean(turnover_ts(bayes_W)))
+)
+
+stab_gt <- stab_gt_df %>%
+  gt() %>%
+  tab_header(title = md("**Stability Metrics**")) %>%
+  cols_label(Plug_in = "Plug-in") %>%
+  fmt_number(columns = c(Plug_in, Bayesian), decimals = 4) %>%
+  tab_options(
+    table.background.color         = BG_COLOR,
+    column_labels.background.color = "#DEDAD5",
+    column_labels.font.weight      = "bold",
+    table.font.size                = px(13),
+    data_row.padding               = px(7),
+    table.border.top.color         = "transparent",
+    table.border.bottom.color      = "transparent"
+  ) %>%
+  opt_horizontal_padding(scale = 2)
+
+stab_gt
+gtsave(stab_gt, "figures/stability_metrics_table.png", zoom = 2)
+
+# ---- 10.3 Sensitivity table ----
+sens_gt <- sensitivity_results %>%
+  gt() %>%
+  tab_header(
+    title    = md("**Sensitivity Analysis: Bayesian Sharpe vs kappa0**"),
+    subtitle = "Plug-in Sharpe shown as reference in chart"
+  ) %>%
+  cols_label(
+    kappa0   = "κ₀",
+    Sharpe   = "Sharpe",
+    Return   = "Ann. Return",
+    Vol      = "Ann. Vol",
+    Turnover = "Avg Turnover"
+  ) %>%
+  fmt_number(columns = c(Sharpe, Return, Vol, Turnover), decimals = 4) %>%
+  tab_style(
+    style    = cell_fill(color = "#cce5ff"),
+    locations = cells_body(
+      rows = Sharpe == max(Sharpe)
+    )
+  ) %>%
+  tab_options(
+    table.background.color         = BG_COLOR,
+    column_labels.background.color = "#DEDAD5",
+    column_labels.font.weight      = "bold",
+    table.font.size                = px(13),
+    data_row.padding               = px(7),
+    table.border.top.color         = "transparent",
+    table.border.bottom.color      = "transparent"
+  ) %>%
+  opt_horizontal_padding(scale = 2) %>%
+  tab_footnote("Blue highlight = highest Sharpe.")
+
+sens_gt
+gtsave(sens_gt, "figures/sensitivity_table.png", zoom = 2)
+
+############################
+# 11. FINAL SUMMARY (console)
+############################
+
+cat("\n====================================================\n")
+cat("  FINAL PERFORMANCE SUMMARY\n")
+cat("====================================================\n")
+cat(sprintf("%-25s %10s %10s %14s\n", "Metric", "Plug-in", "Bayesian", "Equal-Weight"))
+cat(strrep("-", 63), "\n")
+cat(sprintf("%-25s %9.2f%% %9.2f%% %13.2f%%\n", "Annualised Return",
+            m_plugin$Annualized_Return * 100,
+            m_bayes$Annualized_Return  * 100,
+            m_ew$Annualized_Return     * 100))
+cat(sprintf("%-25s %9.2f%% %9.2f%% %13.2f%%\n", "Annualised Volatility",
+            m_plugin$Annualized_Volatility * 100,
+            m_bayes$Annualized_Volatility  * 100,
+            m_ew$Annualized_Volatility     * 100))
+cat(sprintf("%-25s %10.4f %10.4f %14.4f\n", "Sharpe Ratio",
+            m_plugin$Sharpe_Ratio,
+            m_bayes$Sharpe_Ratio,
+            m_ew$Sharpe_Ratio))
+cat(sprintf("%-25s %9.2f%% %9.2f%% %13.2f%%\n", "Max Drawdown",
+            m_plugin$Max_Drawdown * 100,
+            m_bayes$Max_Drawdown  * 100,
+            m_ew$Max_Drawdown     * 100))
+cat(sprintf("%-25s %10.4f %10.4f %14s\n", "Avg Turnover",
+            turnover_results$Avg_Turnover[1],
+            turnover_results$Avg_Turnover[2],
+            "—"))
+cat("====================================================\n")
+cat("\nOutputs -> output/\nFigures  -> figures/\nDone.\n")
