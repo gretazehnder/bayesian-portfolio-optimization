@@ -10,7 +10,7 @@
 ############################
 
 required_packages <- c("tidyverse", "moments", "corrplot", "quadprog",
-                       "ggplot2", "scales", "zoo", "gt", "webshot2")
+                       "ggplot2", "scales", "zoo")
 for (pkg in required_packages) {
   if (!requireNamespace(pkg, quietly = TRUE)) install.packages(pkg)
 }
@@ -22,7 +22,7 @@ library(quadprog)
 library(ggplot2)
 library(scales)
 library(zoo)
-library(gt)
+
 
 dir.create("output",  showWarnings = FALSE)
 dir.create("figures", showWarnings = FALSE)
@@ -199,6 +199,10 @@ bayes_weights <- function(R_window, lambda = 5,
   mu0 <- rep(0, p)
   nu0 <- p + nu0_extra
   
+  # The NIW prior is implemented in an empirical Bayes form, where the prior
+  # scale is calibrated using the average variance observed in each rolling
+  # estimation window. This means S0 varies across windows; the prior is not
+  # a fixed subjective belief but adapts to the local variance regime.
   prior_var <- mean(diag(S_sample))
   S0 <- prior_var * diag(p) * (nu0 - p - 1)
   
@@ -262,50 +266,7 @@ compute_turnover <- function(W) {
   mean(rowSums(abs(diff(W))))
 }
 
-# ------------------------------------------------------------------
-# 4.5  gt table helper — consistent style across all tables
-# ------------------------------------------------------------------
-save_gt_table <- function(gt_obj, filepath, width = 700) {
-  gt_obj %>%
-    gtsave(filepath)
-}
 
-make_gt <- function(df, title, subtitle = NULL,
-                    pct_cols  = NULL,   # columns to format as percentage
-                    num_cols  = NULL,   # columns to format as plain number
-                    decimals  = 2) {
-  
-  tbl <- df %>%
-    gt() %>%
-    tab_header(
-      title    = md(paste0("**", title, "**")),
-      subtitle = if (!is.null(subtitle)) subtitle else NULL
-    ) %>%
-    tab_options(
-      table.background.color        = BG_COLOR,
-      column_labels.background.color = "#DEDAD5",
-      column_labels.font.weight     = "bold",
-      table.font.size               = px(13),
-      data_row.padding              = px(6),
-      table.border.top.color        = "transparent",
-      table.border.bottom.color     = "transparent"
-    ) %>%
-    opt_horizontal_padding(scale = 2)
-  
-  if (!is.null(pct_cols)) {
-    tbl <- tbl %>%
-      fmt_number(columns = all_of(pct_cols),
-                 decimals = decimals,
-                 suffix   = "%")
-  }
-  
-  if (!is.null(num_cols)) {
-    tbl <- tbl %>%
-      fmt_number(columns = all_of(num_cols), decimals = decimals)
-  }
-  
-  tbl
-}
 
 ############################
 # 5. TRAINING SAMPLE WEIGHTS
@@ -374,9 +335,10 @@ cat("Out-of-sample:    ",
 
 plugin_ret <- numeric(n_steps)
 bayes_ret  <- numeric(n_steps)
-ew_ret     <- numeric(n_steps)          # equally weighted benchmark
+ew_ret     <- numeric(n_steps)
 plugin_W   <- matrix(NA_real_, nrow = n_steps, ncol = N_assets)
 bayes_W    <- matrix(NA_real_, nrow = n_steps, ncol = N_assets)
+ew_W       <- matrix(NA_real_, nrow = n_steps, ncol = N_assets)
 
 backtest_dates <- dates_all[(window + 1):N_obs]
 
@@ -386,20 +348,30 @@ for (t in seq_len(n_steps)) {
   
   w_p <- plugin_weights(R_window, lambda = 5)
   w_b <- bayes_weights( R_window, lambda = 5)
-  w_e <- rep(1 / N_assets, N_assets)   # equally weighted — no estimation needed
+  w_e <- rep(1 / N_assets, N_assets)
   
-  plugin_ret[t] <- log(sum(w_p * exp(r_next)))
-  bayes_ret[t]  <- log(sum(w_b * exp(r_next)))
-  ew_ret[t]     <- log(sum(w_e * exp(r_next)))
+  # Portfolio log-return: convert log-returns to linear, compute weighted sum,
+  # then convert back. log(sum(w * exp(r))) would be a geometric mean, not the
+  # correct arithmetic portfolio return.
+  plugin_ret[t] <- log(1 + sum(w_p * (exp(r_next) - 1)))
+  bayes_ret[t]  <- log(1 + sum(w_b * (exp(r_next) - 1)))
+  ew_ret[t]     <- log(1 + sum(w_e * (exp(r_next) - 1)))
   
   plugin_W[t, ] <- w_p
   bayes_W[t, ]  <- w_b
+  # EW weights after price drift (before next rebalancing):
+  # w_e_drift reflects how 1/N weights evolve with asset returns,
+  # which is what must be rebalanced back to 1/N each period.
+  r_lin         <- exp(r_next) - 1
+  w_e_drift     <- w_e * (1 + r_lin) / (1 + sum(w_e * r_lin))
+  ew_W[t, ]     <- w_e_drift
   
   if (t %% 50 == 0) cat("Step", t, "/", n_steps, "\n")
 }
 
 colnames(plugin_W) <- asset_names
 colnames(bayes_W)  <- asset_names
+colnames(ew_W)     <- asset_names
 
 ############################
 # 7. PERFORMANCE METRICS
@@ -416,9 +388,18 @@ print(round(results_perf, 4))
 
 turnover_results <- data.frame(
   Method       = c("Plugin", "Bayesian", "EqualWeight"),
-  Avg_Turnover = c(compute_turnover(plugin_W),
-                   compute_turnover(bayes_W),
-                   NA)   # EW has constant weights (no rebalancing drift shown)
+  Avg_Turnover = c(
+    compute_turnover(plugin_W),
+    compute_turnover(bayes_W),
+    {
+      # EW turnover: at each period, the portfolio has drifted from 1/N.
+      # Turnover = average total rebalancing needed to restore 1/N weights.
+      # Measured as mean absolute deviation between drifted weights (ew_W)
+      # and the 1/N target — this is what is actually traded each month.
+      ew_target_W <- matrix(1 / N_assets, nrow = n_steps, ncol = N_assets)
+      mean(rowSums(abs(ew_W - ew_target_W)))
+    }
+  )
 )
 print(turnover_results)
 
@@ -439,7 +420,7 @@ sensitivity_results <- map_dfr(kappa_grid, function(k) {
     
     w_b <- bayes_weights(R_window, lambda = 5, kappa0 = k)
     
-    bayes_ret_k[t] <- log(sum(w_b * exp(r_next)))
+    bayes_ret_k[t] <- log(1 + sum(w_b * (exp(r_next) - 1)))
     bayes_W_k[t, ] <- w_b
   }
   
@@ -462,7 +443,7 @@ bayes_ret_25 <- {
     R_window <- R_all[t:(t + window - 1), ]
     r_next   <- R_all[t + window, ]
     w_b25    <- bayes_weights(R_window, lambda = 5, kappa0 = 25)
-    tmp[t]   <- log(sum(w_b25 * exp(r_next)))
+    tmp[t]   <- log(1 + sum(w_b25 * (exp(r_next) - 1)))
   }
   tmp
 }
@@ -474,14 +455,14 @@ bayes_ret_50 <- {
     R_window <- R_all[t:(t + window - 1), ]
     r_next   <- R_all[t + window, ]
     w_b50    <- bayes_weights(R_window, lambda = 5, kappa0 = 50)
-    tmp[t]   <- log(sum(w_b50 * exp(r_next)))
+    tmp[t]   <- log(1 + sum(w_b50 * (exp(r_next) - 1)))
   }
   tmp
 }
 
 p_kappa_sharpe <- ggplot(sensitivity_results, aes(x = kappa0, y = Sharpe)) +
-  geom_line(color = COL_BAYES, linewidth = 1) +
-  geom_point(color = COL_BAYES, size = 3) +
+  geom_line(color = COL_BAYES, linewidth = 0.7) +
+  geom_point(color = COL_BAYES, size = 2) +
   geom_hline(yintercept = m_plugin$Sharpe_Ratio,
              linetype = "dashed", color = COL_PLUGIN) +
   geom_hline(yintercept = m_ew$Sharpe_Ratio,
@@ -505,7 +486,7 @@ cum_df_kappa <- data.frame(
 p_compare <- cum_df_kappa %>%
   pivot_longer(-Date, names_to = "Strategy", values_to = "Wealth") %>%
   ggplot(aes(x = Date, y = Wealth, color = Strategy)) +
-  geom_line(linewidth = 1) +
+  geom_line(linewidth = 0.7) +
   scale_color_manual(values = c("Bayes_25" = COL_BAYES, "Bayes_50" = "#1b9e77")) +
   labs(title    = "Cumulative Wealth: Bayesian kappa0 = 25 vs 50",
        x = NULL, y = "Wealth ($1 invested)", color = NULL) +
@@ -515,11 +496,20 @@ print(p_compare)
 ggsave("figures/kappa_comparison.png", p_compare, width = 9, height = 5, dpi = 150)
 
 # Results are robust across a wide range of kappa0, with Sharpe peaking around
-# kappa0 = 25-50. We retain kappa0 = 25 as baseline (bayes_ret = bayes_ret_25).
+# kappa0 = 25-50. We retain kappa0 = 25 as the canonical Bayesian strategy.
+# bayes_ret is reassigned here explicitly to avoid silent inconsistencies if
+# the default argument of bayes_weights() were ever changed.
+bayes_ret <- bayes_ret_25
 
 ############################
 # REGIME ANALYSIS
 ############################
+
+# NOTE: The regime analysis is included for descriptive purposes only.
+# Due to the limited number of observations in some sub-periods (e.g. Expansion,
+# Inflation / Rate Shock), Sharpe ratios and returns should be interpreted with
+# caution. Annualised figures computed on fewer than ~36 monthly observations
+# carry large standard errors and are not statistically reliable.
 
 regime <- case_when(
   backtest_dates <= as.Date("2007-12-31") ~ "Expansion",
@@ -541,6 +531,7 @@ regime_df <- data.frame(
 regime_perf <- regime_df %>%
   group_by(Regime) %>%
   summarise(
+    N_obs         = n(),
     Plugin_Sharpe = mean(Plugin)   / sd(Plugin)   * sqrt(12),
     Bayes_Sharpe  = mean(Bayesian) / sd(Bayesian) * sqrt(12),
     EW_Sharpe     = mean(EW)       / sd(EW)       * sqrt(12),
@@ -587,9 +578,9 @@ p_rolling_sharpe <- ggplot(roll_df, aes(x = Date)) +
             alpha = 0.4, inherit.aes = FALSE) +
   scale_fill_manual(values = setNames(regime_bands$fill, regime_bands$label),
                     name = "Regime") +
-  geom_line(aes(y = Plugin,   color = "Plug-in"),       linewidth = 0.9) +
-  geom_line(aes(y = Bayesian, color = "Bayesian"),      linewidth = 0.9) +
-  geom_line(aes(y = EW,       color = "Equal-Weight"),  linewidth = 0.9, linetype = "dotted") +
+  geom_line(aes(y = Plugin,   color = "Plug-in"),       linewidth = 0.7) +
+  geom_line(aes(y = Bayesian, color = "Bayesian"),      linewidth = 0.7) +
+  geom_line(aes(y = EW,       color = "Equal-Weight"),  linewidth = 0.7) +
   geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
   scale_color_manual(values = c("Plug-in"      = COL_PLUGIN,
                                 "Bayesian"     = COL_BAYES,
@@ -630,7 +621,7 @@ write.csv(cum_df, "output/cumulative_wealth.csv", row.names = FALSE)
 p_wealth <- cum_df %>%
   pivot_longer(-Date, names_to = "Strategy", values_to = "Wealth") %>%
   ggplot(aes(x = Date, y = Wealth, colour = Strategy)) +
-  geom_line(linewidth = 0.9) +
+  geom_line(linewidth = 0.7) +
   scale_colour_manual(values = c("Plugin"       = COL_PLUGIN,
                                  "Bayesian"     = COL_BAYES,
                                  "Equal_Weight" = COL_EW)) +
@@ -812,167 +803,61 @@ write.csv(
 )
 
 ############################
-# 10. GT TABLES
+# 10. TABLE EXPORTS (CSV)
 ############################
 
-cat("\n=== Saving Tables (gt) ===\n")
+cat("\n=== Saving Tables (CSV) ===\n")
 
 # ---- 10.1 Final performance table ----
-perf_gt_df <- data.frame(
-  Metric   = c("Annualised Return (%)",
-               "Annualised Volatility (%)",
-               "Sharpe Ratio",
-               "Max Drawdown (%)",
-               "Avg Turnover"),
-  
-  Plug_in  = c(m_plugin$Annualized_Return     * 100,
-               m_plugin$Annualized_Volatility * 100,
-               m_plugin$Sharpe_Ratio,
-               m_plugin$Max_Drawdown          * 100,
-               turnover_results$Avg_Turnover[1]),
-  
-  Bayesian = c(m_bayes$Annualized_Return     * 100,
-               m_bayes$Annualized_Volatility * 100,
-               m_bayes$Sharpe_Ratio,
-               m_bayes$Max_Drawdown          * 100,
-               turnover_results$Avg_Turnover[2]),
-  
+perf_csv <- data.frame(
+  Metric       = c("Annualised Return (%)",
+                   "Annualised Volatility (%)",
+                   "Sharpe Ratio",
+                   "Max Drawdown (%)",
+                   "Avg Turnover"),
+  Plug_in      = c(m_plugin$Annualized_Return     * 100,
+                   m_plugin$Annualized_Volatility * 100,
+                   m_plugin$Sharpe_Ratio,
+                   m_plugin$Max_Drawdown          * 100,
+                   turnover_results$Avg_Turnover[1]),
+  Bayesian     = c(m_bayes$Annualized_Return     * 100,
+                   m_bayes$Annualized_Volatility * 100,
+                   m_bayes$Sharpe_Ratio,
+                   m_bayes$Max_Drawdown          * 100,
+                   turnover_results$Avg_Turnover[2]),
   Equal_Weight = c(m_ew$Annualized_Return     * 100,
                    m_ew$Annualized_Volatility * 100,
                    m_ew$Sharpe_Ratio,
                    m_ew$Max_Drawdown          * 100,
-                   NA)
+                   turnover_results$Avg_Turnover[3])
 )
-
-perf_gt <- perf_gt_df %>%
-  gt() %>%
-  tab_header(
-    title    = md("**Performance Summary**"),
-    subtitle = md(paste0("*Out-of-sample: ", period_label, "*"))
-  ) %>%
-  cols_label(
-    Metric       = "Metric",
-    Plug_in      = "Plug-in",
-    Bayesian     = "Bayesian",
-    Equal_Weight = "Equal-Weight"
-  ) %>%
-  fmt_number(
-    columns  = c(Plug_in, Bayesian, Equal_Weight),
-    rows     = Metric %in% c("Annualised Return (%)",
-                             "Annualised Volatility (%)",
-                             "Max Drawdown (%)"),
-    decimals = 2
-  ) %>%
-  fmt_number(
-    columns  = c(Plug_in, Bayesian, Equal_Weight),
-    rows     = Metric == "Sharpe Ratio",
-    decimals = 4
-  ) %>%
-  fmt_number(
-    columns  = c(Plug_in, Bayesian),
-    rows     = Metric == "Avg Turnover",
-    decimals = 4
-  ) %>%
-  fmt_missing(columns = everything(), missing_text = "—") %>%
-  # Highlight best value per row
-  tab_style(
-    style    = cell_fill(color = "#cce5ff"),
-    locations = cells_body(
-      columns = Bayesian,
-      rows    = Metric == "Sharpe Ratio"
-    )
-  ) %>%
-  tab_style(
-    style    = cell_fill(color = "#cce5ff"),
-    locations = cells_body(
-      columns = Bayesian,
-      rows    = Metric == "Max Drawdown (%)"
-    )
-  ) %>%
-  tab_options(
-    table.background.color         = BG_COLOR,
-    column_labels.background.color = "#DEDAD5",
-    column_labels.font.weight      = "bold",
-    table.font.size                = px(13),
-    data_row.padding               = px(7),
-    table.border.top.color         = "transparent",
-    table.border.bottom.color      = "transparent"
-  ) %>%
-  opt_horizontal_padding(scale = 2) %>%
-  tab_footnote("Blue highlight = best value in row.")
-
-perf_gt
-gtsave(perf_gt, "figures/final_performance_table.png", zoom = 2)
+write.csv(perf_csv, "output/table_performance.csv", row.names = FALSE)
+cat("Saved: output/table_performance.csv\n")
 
 # ---- 10.2 Stability metrics table ----
 weight_instability <- function(W) {
-  mean(apply(W, 1, function(w) sum((w - mean(w))^2)))
+  mean(apply(W, 2, sd))
 }
 
 turnover_ts <- function(W) {
   rowSums(abs(diff(W)))
 }
 
-stab_gt_df <- data.frame(
-  Metric   = c("Weight Instability", "Avg Turnover"),
-  Plug_in  = c(weight_instability(plugin_W), mean(turnover_ts(plugin_W))),
-  Bayesian = c(weight_instability(bayes_W),  mean(turnover_ts(bayes_W)))
+stab_csv <- data.frame(
+  Metric       = c("Weight Instability", "Avg Turnover"),
+  Plug_in      = c(weight_instability(plugin_W), mean(turnover_ts(plugin_W))),
+  Bayesian     = c(weight_instability(bayes_W),  mean(turnover_ts(bayes_W))),
+  # Weight Instability is NA for EW: ew_W contains drift-adjusted weights,
+  # not reoptimised weights, so its std dev across time is not comparable
+  # to the instability measure computed for Plug-in and Bayesian.
+  Equal_Weight = c(NA_real_, turnover_results$Avg_Turnover[3])
 )
-
-stab_gt <- stab_gt_df %>%
-  gt() %>%
-  tab_header(title = md("**Stability Metrics**")) %>%
-  cols_label(Plug_in = "Plug-in") %>%
-  fmt_number(columns = c(Plug_in, Bayesian), decimals = 4) %>%
-  tab_options(
-    table.background.color         = BG_COLOR,
-    column_labels.background.color = "#DEDAD5",
-    column_labels.font.weight      = "bold",
-    table.font.size                = px(13),
-    data_row.padding               = px(7),
-    table.border.top.color         = "transparent",
-    table.border.bottom.color      = "transparent"
-  ) %>%
-  opt_horizontal_padding(scale = 2)
-
-stab_gt
-gtsave(stab_gt, "figures/stability_metrics_table.png", zoom = 2)
+write.csv(stab_csv, "output/table_stability.csv", row.names = FALSE)
+cat("Saved: output/table_stability.csv\n")
 
 # ---- 10.3 Sensitivity table ----
-sens_gt <- sensitivity_results %>%
-  gt() %>%
-  tab_header(
-    title    = md("**Sensitivity Analysis: Bayesian Sharpe vs kappa0**"),
-    subtitle = "Plug-in Sharpe shown as reference in chart"
-  ) %>%
-  cols_label(
-    kappa0   = "κ₀",
-    Sharpe   = "Sharpe",
-    Return   = "Ann. Return",
-    Vol      = "Ann. Vol",
-    Turnover = "Avg Turnover"
-  ) %>%
-  fmt_number(columns = c(Sharpe, Return, Vol, Turnover), decimals = 4) %>%
-  tab_style(
-    style    = cell_fill(color = "#cce5ff"),
-    locations = cells_body(
-      rows = Sharpe == max(Sharpe)
-    )
-  ) %>%
-  tab_options(
-    table.background.color         = BG_COLOR,
-    column_labels.background.color = "#DEDAD5",
-    column_labels.font.weight      = "bold",
-    table.font.size                = px(13),
-    data_row.padding               = px(7),
-    table.border.top.color         = "transparent",
-    table.border.bottom.color      = "transparent"
-  ) %>%
-  opt_horizontal_padding(scale = 2) %>%
-  tab_footnote("Blue highlight = highest Sharpe.")
-
-sens_gt
-gtsave(sens_gt, "figures/sensitivity_table.png", zoom = 2)
+write.csv(sensitivity_results, "output/table_sensitivity.csv", row.names = FALSE)
+cat("Saved: output/table_sensitivity.csv\n")
 
 ############################
 # 11. FINAL SUMMARY (console)
@@ -999,9 +884,9 @@ cat(sprintf("%-25s %9.2f%% %9.2f%% %13.2f%%\n", "Max Drawdown",
             m_plugin$Max_Drawdown * 100,
             m_bayes$Max_Drawdown  * 100,
             m_ew$Max_Drawdown     * 100))
-cat(sprintf("%-25s %10.4f %10.4f %14s\n", "Avg Turnover",
+cat(sprintf("%-25s %10.4f %10.4f %14.4f\n", "Avg Turnover",
             turnover_results$Avg_Turnover[1],
             turnover_results$Avg_Turnover[2],
-            "—"))
+            turnover_results$Avg_Turnover[3]))
 cat("====================================================\n")
 cat("\nOutputs -> output/\nFigures  -> figures/\nDone.\n")
