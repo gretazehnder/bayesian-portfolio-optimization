@@ -31,7 +31,7 @@ COL_PLUGIN <- "#d73027"
 COL_BAYES  <- "#2166ac"
 COL_EW     <- "#4dac26"   # equally weighted benchmark
 
-BG_COLOR <- "#F5F5F0"
+BG_COLOR <- "#FFFFFF"
 
 theme_portfolio <- theme_minimal(base_size = 13) +
   theme(
