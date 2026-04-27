@@ -51,6 +51,8 @@ theme_portfolio <- theme_minimal(base_size = 13) +
 # Consumer, Energy, Industrial). With a 60-month window this gives
 # n/m = 3.0, which satisfies n > m for a non-singular covariance matrix
 # (Jobson & Korkie, 1980).
+# Notation note: throughout this script, p denotes the number of assets,
+# corresponding to m in the report notation.
 stocks      <- read.csv("data/stocks.csv", stringsAsFactors = FALSE)
 stocks$Date <- as.Date(stocks$Date)
 stocks      <- stocks %>% arrange(Date)
