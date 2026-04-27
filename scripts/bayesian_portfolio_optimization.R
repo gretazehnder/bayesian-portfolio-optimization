@@ -272,6 +272,14 @@ compute_turnover <- function(W) {
 # 5. TRAINING SAMPLE WEIGHTS
 ############################
 
+# lambda = 5: risk-aversion coefficient following the mean-variance
+# formulation of Lai, Xing & Chen (2011), eq. (3.1).
+# λ = 5 corresponds to moderate risk aversion and is consistent with
+# values used in their simulation study (Table 1, λ = 1, 5, 10).
+# A sensitivity analysis on λ (analogous to the kappa0 grid above)
+# is left as future work.
+
+
 w_plugin_train <- plugin_weights(R_first60, lambda = 5)
 w_bayes_train  <- bayes_weights( R_first60, lambda = 5)
 names(w_plugin_train) <- asset_names
@@ -507,8 +515,8 @@ bayes_ret <- bayes_ret_25
 
 # NOTE: The regime analysis is included for descriptive purposes only.
 # Due to the limited number of observations in some sub-periods (e.g. Expansion,
-# Inflation / Rate Shock), Sharpe ratios and returns should be interpreted with
-# caution. Annualised figures computed on fewer than ~36 monthly observations
+# Inflation / Rate Shock), Sharpe ratios and returns should be interpreted with caution. 
+# Annualised figures computed on fewer than ~36 monthly observations
 # carry large standard errors and are not statistically reliable.
 
 regime <- case_when(
