@@ -47,6 +47,10 @@ theme_portfolio <- theme_minimal(base_size = 13) +
 # 1. LOAD DATA
 ############################
 
+# 20 large-cap US stocks across 6 sectors (Tech, Finance, Healthcare,
+# Consumer, Energy, Industrial). With a 60-month window this gives
+# n/m = 3.0, which satisfies n > m for a non-singular covariance matrix
+# (Jobson & Korkie, 1980).
 stocks      <- read.csv("data/stocks.csv", stringsAsFactors = FALSE)
 stocks$Date <- as.Date(stocks$Date)
 stocks      <- stocks %>% arrange(Date)
@@ -196,13 +200,19 @@ bayes_weights <- function(R_window, lambda = 5,
   # nu0_extra controls degrees of freedom beyond the minimum (p+1).
   # Note: nu0 is NOT part of the sensitivity grid here; it could be
   # an additional axis of robustness analysis (left as future work).
+  
+  # kappa0 = 25: weakly informative prior, equivalent to 25 pseudo-
+  # observations. Chosen to shrink the posterior mean toward zero
+  # without dominating the 60 actual observations in the window.
+  
+  # zero prior mean: neutral assumption consistent with weak-form
+  # market efficiency. The data then pull the posterior away from zero.
   mu0 <- rep(0, p)
   nu0 <- p + nu0_extra
   
-  # The NIW prior is implemented in an empirical Bayes form, where the prior
-  # scale is calibrated using the average variance observed in each rolling
-  # estimation window. This means S0 varies across windows; the prior is not
-  # a fixed subjective belief but adapts to the local variance regime.
+  # S0 scaled by the average in-sample variance (empirical Bayes):
+  # the prior covariance adapts to the volatility regime of each window
+  # rather than being fixed across the entire backtest.
   prior_var <- mean(diag(S_sample))
   S0 <- prior_var * diag(p) * (nu0 - p - 1)
   
@@ -266,22 +276,16 @@ compute_turnover <- function(W) {
   mean(rowSums(abs(diff(W))))
 }
 
-
-
 ############################
 # 5. TRAINING SAMPLE WEIGHTS
 ############################
 
-# lambda = 5: risk-aversion coefficient following the mean-variance
-# formulation of Lai, Xing & Chen (2011), eq. (3.1).
-# λ = 5 corresponds to moderate risk aversion and is consistent with
-# values used in their simulation study (Table 1, λ = 1, 5, 10).
-# A sensitivity analysis on λ (analogous to the kappa0 grid above)
-# is left as future work.
+# lambda = 5: moderate risk aversion, consistent with Table 1 of
+# Lai et al. (2011) which evaluates lambda = 1, 5, 10.
+LAMBDA <- 5
 
-
-w_plugin_train <- plugin_weights(R_first60, lambda = 5)
-w_bayes_train  <- bayes_weights( R_first60, lambda = 5)
+w_plugin_train <- plugin_weights(R_first60, lambda = LAMBDA)
+w_bayes_train  <- bayes_weights( R_first60, lambda = LAMBDA)
 names(w_plugin_train) <- asset_names
 names(w_bayes_train)  <- asset_names
 
@@ -331,6 +335,10 @@ abline(h = 0, lty = 2)
 # 6. ROLLING WINDOW BACKTEST
 ############################
 
+# 60-month window: chosen to keep n/m = 3.0 while starting the
+# out-of-sample period early enough to include the 2008-2009 GFC.
+# Lai et al. (2011) use n=120, but that would push the backtest
+# start to 2010, missing the crisis entirely.
 window  <- 60
 n_steps <- N_obs - window
 
@@ -354,8 +362,8 @@ for (t in seq_len(n_steps)) {
   R_window <- R_all[t:(t + window - 1), ]
   r_next   <- R_all[t + window, ]
   
-  w_p <- plugin_weights(R_window, lambda = 5)
-  w_b <- bayes_weights( R_window, lambda = 5)
+  w_p <- plugin_weights(R_window, lambda = LAMBDA)
+  w_b <- bayes_weights( R_window, lambda = LAMBDA)
   w_e <- rep(1 / N_assets, N_assets)
   
   # Portfolio log-return: convert log-returns to linear, compute weighted sum,
@@ -426,7 +434,7 @@ sensitivity_results <- map_dfr(kappa_grid, function(k) {
     R_window <- R_all[t:(t + window - 1), ]
     r_next   <- R_all[t + window, ]
     
-    w_b <- bayes_weights(R_window, lambda = 5, kappa0 = k)
+    w_b <- bayes_weights(R_window, lambda = LAMBDA, kappa0 = k)
     
     bayes_ret_k[t] <- log(1 + sum(w_b * (exp(r_next) - 1)))
     bayes_W_k[t, ] <- w_b
@@ -450,7 +458,7 @@ bayes_ret_25 <- {
   for (t in seq_len(n_steps)) {
     R_window <- R_all[t:(t + window - 1), ]
     r_next   <- R_all[t + window, ]
-    w_b25    <- bayes_weights(R_window, lambda = 5, kappa0 = 25)
+    w_b25    <- bayes_weights(R_window, lambda = LAMBDA, kappa0 = 25)
     tmp[t]   <- log(1 + sum(w_b25 * (exp(r_next) - 1)))
   }
   tmp
@@ -462,7 +470,7 @@ bayes_ret_50 <- {
   for (t in seq_len(n_steps)) {
     R_window <- R_all[t:(t + window - 1), ]
     r_next   <- R_all[t + window, ]
-    w_b50    <- bayes_weights(R_window, lambda = 5, kappa0 = 50)
+    w_b50    <- bayes_weights(R_window, lambda = LAMBDA, kappa0 = 50)
     tmp[t]   <- log(1 + sum(w_b50 * (exp(r_next) - 1)))
   }
   tmp
@@ -503,22 +511,19 @@ p_compare <- cum_df_kappa %>%
 print(p_compare)
 ggsave("figures/kappa_comparison.png", p_compare, width = 9, height = 5, dpi = 150)
 
-# Results are robust across a wide range of kappa0, with Sharpe peaking around
-# kappa0 = 25-50. We retain kappa0 = 25 as the canonical Bayesian strategy.
-# bayes_ret is reassigned here explicitly to avoid silent inconsistencies if
-# the default argument of bayes_weights() were ever changed.
+# kappa0 = 25 selected as canonical strategy for two reasons:
+# (1) theoretically it is a weakly informative prior (25 pseudo-observations
+#     vs 60 actual data points), avoiding over-shrinkage;
+# (2) empirically kappa=25 outperforms kappa=50 after 2020, suggesting
+#     the weaker prior better adapts to structural shifts in return dynamics.
 bayes_ret <- bayes_ret_25
 
 ############################
 # REGIME ANALYSIS
 ############################
 
-# NOTE: The regime analysis is included for descriptive purposes only.
-# Due to the limited number of observations in some sub-periods (e.g. Expansion,
-# Inflation / Rate Shock), Sharpe ratios and returns should be interpreted with caution. 
-# Annualised figures computed on fewer than ~36 monthly observations
-# carry large standard errors and are not statistically reliable.
-
+# NOTE: descriptive only — sub-periods with fewer than ~36 observations
+# yield unreliable annualised Sharpe ratios and should be read with caution.
 regime <- case_when(
   backtest_dates <= as.Date("2007-12-31") ~ "Expansion",
   backtest_dates <= as.Date("2009-12-31") ~ "Global Financial Crisis",
@@ -814,9 +819,6 @@ write.csv(
 # 10. TABLE EXPORTS (CSV)
 ############################
 
-cat("\n=== Saving Tables (CSV) ===\n")
-
-# ---- 10.1 Final performance table ----
 perf_csv <- data.frame(
   Metric       = c("Annualised Return (%)",
                    "Annualised Volatility (%)",
@@ -840,9 +842,7 @@ perf_csv <- data.frame(
                    turnover_results$Avg_Turnover[3])
 )
 write.csv(perf_csv, "output/table_performance.csv", row.names = FALSE)
-cat("Saved: output/table_performance.csv\n")
 
-# ---- 10.2 Stability metrics table ----
 weight_instability <- function(W) {
   mean(apply(W, 2, sd))
 }
@@ -860,12 +860,8 @@ stab_csv <- data.frame(
   # to the instability measure computed for Plug-in and Bayesian.
   Equal_Weight = c(NA_real_, turnover_results$Avg_Turnover[3])
 )
-write.csv(stab_csv, "output/table_stability.csv", row.names = FALSE)
-cat("Saved: output/table_stability.csv\n")
-
-# ---- 10.3 Sensitivity table ----
-write.csv(sensitivity_results, "output/table_sensitivity.csv", row.names = FALSE)
-cat("Saved: output/table_sensitivity.csv\n")
+write.csv(stab_csv,            "output/table_stability.csv",    row.names = FALSE)
+write.csv(sensitivity_results, "output/table_sensitivity.csv",  row.names = FALSE)
 
 ############################
 # 11. FINAL SUMMARY (console)
@@ -897,4 +893,4 @@ cat(sprintf("%-25s %10.4f %10.4f %14.4f\n", "Avg Turnover",
             turnover_results$Avg_Turnover[2],
             turnover_results$Avg_Turnover[3]))
 cat("====================================================\n")
-cat("\nOutputs -> output/\nFigures  -> figures/\nDone.\n")
+cat("\nAll outputs saved in output/ — all figures saved in figures/\n")
