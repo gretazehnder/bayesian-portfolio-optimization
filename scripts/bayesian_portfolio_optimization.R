@@ -50,7 +50,7 @@ theme_portfolio <- theme_minimal(base_size = 13) +
 # 20 large-cap US stocks across 6 sectors (Tech, Finance, Healthcare,
 # Consumer, Energy, Industrial). With a 60-month window this gives
 # n/m = 3.0, which satisfies n > m for a non-singular covariance matrix
-# (Jobson & Korkie, 1980).
+
 # Notation note: throughout this script, p denotes the number of assets,
 # corresponding to m in the report notation.
 stocks      <- read.csv("data/stocks.csv", stringsAsFactors = FALSE)
@@ -209,10 +209,11 @@ bayes_weights <- function(R_window, lambda = 5,
   
   # zero prior mean: neutral assumption consistent with weak-form
   # market efficiency. The data then pull the posterior away from zero.
+  # mu0 corresponds to nu in the report
   mu0 <- rep(0, p)
   nu0 <- p + nu0_extra
   
-  # S0 scaled by the average in-sample variance (empirical Bayes):
+  # S0 (prior scale matrix Psi) scaled by the average in-sample variance (empirical Bayes):
   # the prior covariance adapts to the volatility regime of each window
   # rather than being fixed across the entire backtest.
   prior_var <- mean(diag(S_sample))
@@ -378,8 +379,8 @@ for (t in seq_len(n_steps)) {
   plugin_W[t, ] <- w_p
   bayes_W[t, ]  <- w_b
   # EW weights after price drift (before next rebalancing):
-  # w_e_drift reflects how 1/N weights evolve with asset returns,
-  # which is what must be rebalanced back to 1/N each period.
+  # w_e_drift reflects how 1/m weights evolve with asset returns,
+  # which is what must be rebalanced back to 1/m each period.
   r_lin         <- exp(r_next) - 1
   w_e_drift     <- w_e * (1 + r_lin) / (1 + sum(w_e * r_lin))
   ew_W[t, ]     <- w_e_drift
@@ -410,10 +411,10 @@ turnover_results <- data.frame(
     compute_turnover(plugin_W),
     compute_turnover(bayes_W),
     {
-      # EW turnover: at each period, the portfolio has drifted from 1/N.
-      # Turnover = average total rebalancing needed to restore 1/N weights.
+      # EW turnover: at each period, the portfolio has drifted from 1/m.
+      # Turnover = average total rebalancing needed to restore 1/m weights.
       # Measured as mean absolute deviation between drifted weights (ew_W)
-      # and the 1/N target — this is what is actually traded each month.
+      # and the 1/m target — this is what is actually traded each month.
       ew_target_W <- matrix(1 / N_assets, nrow = n_steps, ncol = N_assets)
       mean(rowSums(abs(ew_W - ew_target_W)))
     }
