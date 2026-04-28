@@ -1,13 +1,6 @@
-############################################################
 # BAYESIAN PORTFOLIO OPTIMIZATION
-# Plug-in vs Bayesian (Normal-Inverse-Wishart)
-# Rolling window backtest | Out-of-sample evaluation
-# Reference: Lai, Xing & Chen (2011), Ann. Appl. Stat.
-############################################################
 
-############################
 # 0. SETUP
-############################
 
 required_packages <- c("tidyverse", "moments", "corrplot", "quadprog",
                        "ggplot2", "scales", "zoo")
@@ -43,15 +36,12 @@ theme_portfolio <- theme_minimal(base_size = 13) +
     legend.background = element_rect(fill = BG_COLOR, color = NA)
   )
 
-############################
 # 1. LOAD DATA
-############################
 
-# 20 large-cap US stocks across 6 sectors (Tech, Finance, Healthcare,
-# Consumer, Energy, Industrial). With a 60-month window this gives
+# 20 large-cap US, with a 60-month window this gives
 # n/m = 3.0, which satisfies n > m for a non-singular covariance matrix
 
-# Notation note: throughout this script, p denotes the number of assets,
+# Note: throughout this script, p denotes the number of assets,
 # corresponding to m in the report notation.
 stocks      <- read.csv("data/stocks.csv", stringsAsFactors = FALSE)
 stocks$Date <- as.Date(stocks$Date)
@@ -63,7 +53,7 @@ cat("Assets: ", ncol(stocks) - 1, "\n")
 cat("Period: ", as.character(min(stocks$Date)),
     "to", as.character(max(stocks$Date)), "\n")
 
-# ---- NA check ----
+# NA check
 na_check <- colSums(is.na(stocks %>% select(-Date)))
 na_check <- na_check[na_check > 0]
 if (length(na_check) == 0) {
@@ -76,9 +66,7 @@ if (length(na_check) == 0) {
     mutate(across(where(is.numeric), ~ zoo::na.locf(., na.rm = FALSE)))
 }
 
-############################
 # 2. LOG RETURNS
-############################
 
 returns <- stocks %>%
   mutate(across(where(is.numeric), ~ log(. / lag(.)))) %>%
@@ -93,15 +81,13 @@ N_obs       <- nrow(R_all)
 cat("Monthly obs: ", N_obs, "\n")
 cat("Assets:      ", N_assets, "\n\n")
 
-############################
 # 3. EDA  (full sample)
-############################
 
 cat("=== EDA ===\n")
 
 # 3.1 Summary statistics
-# Note: kurtosis() from {moments} returns TOTAL kurtosis (normal = 3).
-# Excess kurtosis = kurtosis(x) - 3, which is what most finance literature reports.
+# Note: kurtosis() from {moments} returns TOTAL kurtosis (normal = 3)
+# Excess kurtosis = kurtosis(x) - 3, which is what most finance literature reports
 summary_stats <- data.frame(
   Asset          = asset_names,
   Mean           = unname(colMeans(R_all)),
@@ -124,7 +110,7 @@ skewness_table <- data.frame(
 write.csv(skewness_table, "output/skewness_table.csv", row.names = FALSE)
 
 # 3.3 Shapiro-Wilk normality test
-# H0: normal distribution  |  reject H0 if p-value < 0.05
+# H0: normal distribution -->  reject H0 if p-value < 0.05
 shapiro_table <- data.frame(
   Asset           = asset_names,
   Shapiro_p_value = unname(apply(R_all, 2, function(x) shapiro.test(x)$p.value)),
@@ -134,7 +120,7 @@ cat("Normal assets (Shapiro p > 0.05):",
     sum(shapiro_table$Shapiro_p_value > 0.05), "/", N_assets, "\n")
 write.csv(shapiro_table, "output/shapiro_table.csv", row.names = FALSE)
 
-# 3.4 Correlation & covariance (full sample)
+# 3.4 Correlation and covariance (full sample)
 correlation_matrix <- cor(R_all)
 covariance_matrix  <- cov(R_all)
 write.csv(as.data.frame(correlation_matrix), "output/correlation_matrix.csv", row.names = TRUE)
@@ -148,7 +134,7 @@ corrplot(correlation_matrix, method = "color", type = "upper", tl.cex = 0.7,
          col   = colorRampPalette(c(COL_PLUGIN, "white", COL_BAYES))(200))
 dev.off()
 
-# 3.5 Correlation matrix — first training window (60 months)
+# 3.5 Correlation matrix: first training window (60 months)
 R_first60 <- R_all[1:60, ]
 png("figures/correlation_matrix_training.png", width = 1000, height = 800)
 par(bg = BG_COLOR)
@@ -158,13 +144,9 @@ corrplot(cor(R_first60), method = "color", type = "upper", tl.cex = 0.7,
          col   = colorRampPalette(c(COL_PLUGIN, "white", COL_BAYES))(200))
 dev.off()
 
-############################
 # 4. FUNCTIONS
-############################
 
-# ------------------------------------------------------------------
 # 4.1  Plug-in: classical Markowitz, long-only, fully invested
-# ------------------------------------------------------------------
 plugin_weights <- function(R_window, lambda = 5) {
   p         <- ncol(R_window)
   mu_hat    <- colMeans(R_window)
@@ -185,9 +167,7 @@ plugin_weights <- function(R_window, lambda = 5) {
   w / sum(w)
 }
 
-# ------------------------------------------------------------------
 # 4.2  Bayesian NIW: Normal-Inverse-Wishart conjugate prior
-# ------------------------------------------------------------------
 bayes_weights <- function(R_window, lambda = 5,
                           kappa0    = 25,
                           nu0_extra = 20) {
@@ -198,10 +178,10 @@ bayes_weights <- function(R_window, lambda = 5,
   xbar     <- colMeans(X)
   S_sample <- cov(X)
   
-  # ---- Prior hyperparameters ----
+  # Prior hyperparameters
   # nu0_extra controls degrees of freedom beyond the minimum (p+1).
   # Note: nu0 is NOT part of the sensitivity grid here; it could be
-  # an additional axis of robustness analysis (left as future work).
+  # an additional axis of robustness analysis (left as future work)
   
   # kappa0 = 25: weakly informative prior, equivalent to 25 pseudo-
   # observations. Chosen to shrink the posterior mean toward zero
@@ -209,7 +189,7 @@ bayes_weights <- function(R_window, lambda = 5,
   
   # zero prior mean: neutral assumption consistent with weak-form
   # market efficiency. The data then pull the posterior away from zero.
-  # mu0 corresponds to nu in the report
+  # mu0 corresponds to nu in the original paper
   mu0 <- rep(0, p)
   nu0 <- p + nu0_extra
   
@@ -219,7 +199,7 @@ bayes_weights <- function(R_window, lambda = 5,
   prior_var <- mean(diag(S_sample))
   S0 <- prior_var * diag(p) * (nu0 - p - 1)
   
-  # ---- Posterior update ----
+  #  Posterior update 
   kappa_n <- kappa0 + n
   nu_n    <- nu0 + n
   mu_n    <- (kappa0 * mu0 + n * xbar) / kappa_n
@@ -228,7 +208,7 @@ bayes_weights <- function(R_window, lambda = 5,
     (n - 1) * S_sample +
     (kappa0 * n / kappa_n) * (diff_mu %*% t(diff_mu))
   
-  # ---- Posterior predictive moments ----
+  # Posterior predictive moments
   scale_factor <- (kappa_n + 1) / (kappa_n * (nu_n - p - 1))
   Sigma_pred   <- scale_factor * S_n + diag(1e-6, p)
   
@@ -248,9 +228,7 @@ bayes_weights <- function(R_window, lambda = 5,
   w / sum(w)
 }
 
-# ------------------------------------------------------------------
-# 4.3  Performance metrics (MONTHLY data)
-# ------------------------------------------------------------------
+# 4.3  Performance metrics (monthly data)
 performance_metrics <- function(r) {
   ann_return <- mean(r) * 12
   ann_vol    <- sd(r)   * sqrt(12)
@@ -271,20 +249,16 @@ performance_metrics <- function(r) {
   )
 }
 
-# ------------------------------------------------------------------
 # 4.4  Turnover
-# ------------------------------------------------------------------
 compute_turnover <- function(W) {
   if (nrow(W) < 2) return(NA)
   mean(rowSums(abs(diff(W))))
 }
 
-############################
 # 5. TRAINING SAMPLE WEIGHTS
-############################
 
 # lambda = 5: moderate risk aversion, consistent with Table 1 of
-# Lai et al. (2011) which evaluates lambda = 1, 5, 10.
+# the original paper, which evaluates lambda = 1, 5, 10.
 LAMBDA <- 5
 
 w_plugin_train <- plugin_weights(R_first60, lambda = LAMBDA)
@@ -334,13 +308,11 @@ barplot(diff_w,
         las = 2, col = "darkgray")
 abline(h = 0, lty = 2)
 
-############################
 # 6. ROLLING WINDOW BACKTEST
-############################
 
 # 60-month window: chosen to keep n/m = 3.0 while starting the
 # out-of-sample period early enough to include the 2008-2009 GFC.
-# Lai et al. (2011) use n=120, but that would push the backtest
+# the original paper uses n=120, but that would push the backtest
 # start to 2010, missing the crisis entirely.
 window  <- 60
 n_steps <- N_obs - window
@@ -392,9 +364,7 @@ colnames(plugin_W) <- asset_names
 colnames(bayes_W)  <- asset_names
 colnames(ew_W)     <- asset_names
 
-############################
 # 7. PERFORMANCE METRICS
-############################
 
 cat("\n=== Performance Metrics ===\n")
 
@@ -422,9 +392,7 @@ turnover_results <- data.frame(
 )
 print(turnover_results)
 
-############################
 # SENSITIVITY ANALYSIS
-############################
 
 kappa_grid <- c(5, 10, 25, 50, 100)
 
@@ -516,22 +484,20 @@ ggsave("figures/kappa_comparison.png", p_compare, width = 9, height = 5, dpi = 1
 
 # kappa0 = 25 selected as canonical strategy for two reasons:
 # (1) theoretically it is a weakly informative prior (25 pseudo-observations
-#     vs 60 actual data points), avoiding over-shrinkage;
+#     vs 60 actual data points), avoiding over-shrinkage.
 # (2) empirically kappa=25 outperforms kappa=50 after 2020, suggesting
 #     the weaker prior better adapts to structural shifts in return dynamics.
 bayes_ret <- bayes_ret_25
 
-############################
 # REGIME ANALYSIS
-############################
 
-# NOTE: descriptive only — sub-periods with fewer than ~36 observations
-# yield unreliable annualised Sharpe ratios and should be read with caution.
+# Note: descriptive only (sub-periods with fewer than ~36 observations
+# yield unreliable annualised Sharpe ratios and should be read with caution)
 regime <- case_when(
   backtest_dates <= as.Date("2007-12-31") ~ "Expansion",
   backtest_dates <= as.Date("2009-12-31") ~ "Global Financial Crisis",
   backtest_dates <  as.Date("2020-02-01") ~ "Low Vol / Expansion",
-  backtest_dates <  as.Date("2021-12-31") ~ "COVID Crisis & Recovery",
+  backtest_dates <  as.Date("2021-12-31") ~ "COVID Crisis and Recovery",
   backtest_dates <  as.Date("2023-01-01") ~ "Inflation / Rate Shock",
   TRUE                                    ~ "Recent Stabilization"
 )
@@ -558,9 +524,7 @@ regime_perf <- regime_df %>%
 
 print(regime_perf)
 
-############################
 # ROLLING SHARPE RATIO
-############################
 
 rolling_sharpe <- function(r, window = 24) {
   rollapply(r, width = window, FUN = function(x) {
@@ -610,9 +574,7 @@ p_rolling_sharpe <- ggplot(roll_df, aes(x = Date)) +
 ggsave("figures/rolling_sharpe.png", p_rolling_sharpe, width = 11, height = 5, dpi = 150)
 print(p_rolling_sharpe)
 
-############################
 # 8. FIGURES
-############################
 
 cat("\n=== Generating Figures ===\n")
 
@@ -621,7 +583,7 @@ period_label <- paste0(
   format(tail(backtest_dates, 1), "%b %Y")
 )
 
-# ---- 8.1 Cumulative Wealth ----
+# Cumulative wealth
 cum_plugin <- exp(cumsum(plugin_ret))
 cum_bayes  <- exp(cumsum(bayes_ret))
 cum_ew     <- exp(cumsum(ew_ret))
@@ -648,7 +610,7 @@ p_wealth <- cum_df %>%
 
 ggsave("figures/cumulative_wealth.png", p_wealth, width = 10, height = 5, dpi = 150)
 
-# ---- 8.2 Drawdown ----
+# Drawdown
 peak_p <- cummax(cum_plugin)
 peak_b <- cummax(cum_bayes)
 peak_e <- cummax(cum_ew)
@@ -680,7 +642,7 @@ p_drawdown <- ggplot(dd_long, aes(x = Date, y = Drawdown, fill = Strategy)) +
 
 ggsave("figures/drawdown.png", p_drawdown, width = 10, height = 4, dpi = 150)
 
-# ---- 8.3 Weight instability ----
+# Weight instability
 p_wvol <- data.frame(
   Asset    = asset_names,
   Plugin   = unname(apply(plugin_W, 2, sd)),
@@ -699,7 +661,7 @@ p_wvol <- data.frame(
 
 ggsave("figures/weight_instability.png", p_wvol, width = 9, height = 7, dpi = 150)
 
-# ---- 8.4 Monthly returns ----
+# Monthly returns
 p_ret <- data.frame(
   Date         = backtest_dates,
   Plugin       = plugin_ret,
@@ -720,7 +682,7 @@ p_ret <- data.frame(
 
 ggsave("figures/monthly_returns.png", p_ret, width = 10, height = 4, dpi = 150)
 
-# ---- 8.5 Performance bar charts ----
+# Performance bar charts
 p_perf_pct <- data.frame(
   Method     = c("Plugin", "Bayesian", "Equal-Weight"),
   Ann_Return = c(m_plugin$Annualized_Return,    m_bayes$Annualized_Return,    m_ew$Annualized_Return),
@@ -733,7 +695,7 @@ p_perf_pct <- data.frame(
                                "Bayesian"     = COL_BAYES,
                                "Equal-Weight" = COL_EW)) +
   scale_y_continuous(labels = percent_format(accuracy = 0.1)) +
-  labs(title = "Annualised Return & Volatility",
+  labs(title = "Annualised Return and Volatility",
        x = NULL, y = NULL, fill = NULL) +
   theme_portfolio
 
@@ -753,7 +715,7 @@ p_sharpe <- data.frame(
 ggsave("figures/performance_pct.png", p_perf_pct, width = 7, height = 5, dpi = 150)
 ggsave("figures/sharpe_ratio.png",   p_sharpe,   width = 6, height = 4, dpi = 150)
 
-# ---- 8.6 Distribution of Portfolio Returns ----
+# Distribution of portfolio returns
 dist_df <- data.frame(
   Return   = c(plugin_ret, bayes_ret, ew_ret),
   Strategy = rep(c("Plugin", "Bayesian", "Equal-Weight"), each = length(plugin_ret))
@@ -774,7 +736,7 @@ p_dist <- ggplot(dist_df, aes(x = Return, fill = Strategy)) +
 
 ggsave("figures/return_distribution.png", p_dist, width = 8, height = 5, dpi = 150)
 
-# ---- 8.7 Left tail comparison ----
+# Left tail comparison
 tail_df <- dist_df %>%
   filter(Return < quantile(Return, 0.1))
 
@@ -790,7 +752,7 @@ p_tail <- ggplot(tail_df, aes(x = Return, fill = Strategy)) +
 
 ggsave("figures/left_tail.png", p_tail, width = 8, height = 5, dpi = 150)
 
-# ---- Downside risk metrics ----
+# Downside risk metrics
 cat("\nLoss probability:\n")
 cat("Plugin:", mean(plugin_ret < 0), "\n")
 cat("Bayes :", mean(bayes_ret  < 0), "\n")
@@ -801,9 +763,7 @@ cat("Plugin:", mean(plugin_ret < -0.05), "\n")
 cat("Bayes :", mean(bayes_ret  < -0.05), "\n")
 cat("EW    :", mean(ew_ret     < -0.05), "\n")
 
-############################
 # 9. SAVE OUTPUTS
-############################
 
 write.csv(summary_stats,    "output/summary_stats.csv",       row.names = FALSE)
 write.csv(skewness_table,   "output/skewness_table.csv",      row.names = FALSE)
@@ -818,9 +778,7 @@ write.csv(
   "output/backtest_returns.csv", row.names = FALSE
 )
 
-############################
 # 10. TABLE EXPORTS (CSV)
-############################
 
 perf_csv <- data.frame(
   Metric       = c("Annualised Return (%)",
@@ -866,9 +824,7 @@ stab_csv <- data.frame(
 write.csv(stab_csv,            "output/table_stability.csv",    row.names = FALSE)
 write.csv(sensitivity_results, "output/table_sensitivity.csv",  row.names = FALSE)
 
-############################
 # 11. FINAL SUMMARY (console)
-############################
 
 cat("\n====================================================\n")
 cat("  FINAL PERFORMANCE SUMMARY\n")
